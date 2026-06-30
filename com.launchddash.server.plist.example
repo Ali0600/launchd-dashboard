@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Self-host the dashboard as its own launchd agent (so it's always up).
+  1. Edit the two ABSOLUTE paths below to match where you cloned this repo.
+  2. Run ./run.sh once to create the .venv.
+  3. cp com.launchddash.server.plist.example ~/Library/LaunchAgents/com.launchddash.server.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.launchddash.server.plist
+  4. Open http://127.0.0.1:8787  (the dashboard will then list this very agent).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.launchddash.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/CHANGE_ME/Documents/launchd-dashboard/.venv/bin/uvicorn</string>
+        <string>app.main:app</string>
+        <string>--host</string><string>127.0.0.1</string>
+        <string>--port</string><string>8787</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/CHANGE_ME/Documents/launchd-dashboard</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/CHANGE_ME/Documents/launchd-dashboard/server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/CHANGE_ME/Documents/launchd-dashboard/server.log</string>
+</dict>
+</plist>

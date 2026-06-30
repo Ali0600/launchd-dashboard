@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test / tooling
+.coverage
+.pytest_cache/
+
+# Local launchd install (generated from the .example template)
+com.launchddash.server.plist
+
+# Misc
+.DS_Store
+*.log
