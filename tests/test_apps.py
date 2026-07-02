@@ -2,7 +2,6 @@
 mapping, TCC guard. No live launchctl (fixtures only), same policy as the rest."""
 
 import plistlib
-from pathlib import Path
 
 from app import apps
 
