@@ -2,5 +2,5 @@
 # system python3 (3.9 on macOS). fastapi 0.129+ and uvicorn 0.40+ require
 # >=3.10, so those ranges are ignored in .github/dependabot.yml — verified with
 # `pip install --dry-run` on a 3.9 venv before pinning.
-fastapi>=0.115
+fastapi>=0.128.8
 uvicorn[standard]>=0.30
