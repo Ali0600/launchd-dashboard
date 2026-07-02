@@ -14,3 +14,6 @@ com.launchddash.server.plist
 # Misc
 .DS_Store
 *.log
+
+# Personal app launcher config (machine-specific paths; see apps.json.example)
+apps.json
