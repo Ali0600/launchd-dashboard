@@ -28,8 +28,15 @@ deterministic and read-honest.
   agent and appears in its own list.
 
 ## Quickstart
+
+> **Clone it somewhere launchd can read.** macOS privacy protection (TCC) blocks
+> background agents from `~/Documents`, `~/Desktop`, and `~/Downloads` — a launchd
+> agent there dies with `PermissionError: [Errno 1] Operation not permitted` before
+> your code even runs (your terminal works only because Terminal.app holds the
+> folder grant). Clone to a home-root path like `~/launchd-dashboard` instead.
+
 ```bash
-cd ~/Documents/launchd-dashboard
+cd ~/launchd-dashboard
 ./run.sh                       # creates .venv on first run, serves on :8787
 # open http://127.0.0.1:8787
 ```
@@ -48,6 +55,11 @@ sed "s|/Users/CHANGE_ME|$HOME|g" com.launchddash.server.plist.example \
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.launchddash.server.plist
 ```
 Now `http://127.0.0.1:8787` is always up, and the dashboard lists itself.
+
+Stop the `./run.sh` instance first if it's running — the agent can't bind :8787 while
+it's held (the dashboard's own Listening-ports section will show you the holder).
+The template assumes the repo is at `~/launchd-dashboard`; if it's elsewhere, keep it
+out of TCC-protected folders (see Quickstart) and adjust the paths.
 
 ## API
 | Method | Path | Purpose |

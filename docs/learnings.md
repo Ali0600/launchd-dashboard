@@ -26,3 +26,21 @@ matches an agent pid attributes them correctly.
 
 **Takeaway:** to map a resource (socket/file/child) back to a managed service, compare
 against the service pid's whole *ancestry*, not just the pid itself.
+
+## launchd agents get EPERM in TCC-protected folders — EPERM ≠ EACCES
+
+macOS privacy protection (TCC) guards `~/Documents`, `~/Desktop`, and `~/Downloads` per
+*app*. Terminal.app holds a grant the user approved once, so everything launched from a
+shell inherits it — but a launchd agent runs under `launchd`, gets no grant and no prompt,
+and any file read in those folders fails with `PermissionError: [Errno 1] Operation not
+permitted`.
+
+**Why it came up:** self-hosting this dashboard as `com.launchddash.server` failed with
+exit 256 while `./run.sh` from the terminal worked perfectly — the repo lived in
+`~/Documents`, so the agent's Python couldn't even read `.venv/pyvenv.cfg`. Moving the
+repo to `~/launchd-dashboard` (home root, like `~/grocery-helper`, whose weekly agent
+always worked) fixed it with no settings changes.
+
+**Takeaway:** put anything a background agent must read outside TCC-protected folders —
+and read the errno: `Operation not permitted` (EPERM) with correct Unix permission bits
+means a sandbox/TCC layer, not `chmod`.
