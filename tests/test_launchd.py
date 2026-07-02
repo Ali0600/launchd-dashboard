@@ -65,3 +65,11 @@ def test_parse_launchctl_list_idle_nonzero_exit():
 def test_is_vendor():
     assert launchd.is_vendor("com.google.keystone.agent")
     assert not launchd.is_vendor("com.groceryhelper.recipes")
+
+
+def test_is_healthy():
+    assert launchd.is_healthy(None, None)      # never ran
+    assert launchd.is_healthy(None, 0)         # clean last exit
+    assert not launchd.is_healthy(None, 256)   # idle after a crash
+    assert launchd.is_healthy(12345, 256)      # crashed before, but running NOW
+    assert launchd.is_healthy(12345, None)     # running, never exited

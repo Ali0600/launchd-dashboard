@@ -243,6 +243,13 @@ def _last_run(plist: dict) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # The list the API serves
 # --------------------------------------------------------------------------- #
+def is_healthy(pid: Optional[int], last_exit: Optional[int]) -> bool:
+    """A live process is healthy — a past crash is history once KeepAlive (or the user)
+    got it running again; the exit code stays visible in the row's subtitle. Idle or
+    unloaded agents are judged by their last exit (None = never ran = fine)."""
+    return pid is not None or last_exit in (0, None)
+
+
 def build_agent(path: Path, plist: dict) -> Agent:
     label = plist.get("Label", path.stem)
     state = launchctl_state(label)
@@ -264,7 +271,7 @@ def build_agent(path: Path, plist: dict) -> Agent:
         path=str(path),
         schedule=humanize_schedule(plist),
         status=status,
-        healthy=last_exit in (0, None),
+        healthy=is_healthy(pid, last_exit),
         last_exit=last_exit,
         pid=pid,
         program=prog,
