@@ -3,4 +3,4 @@
 # >=3.10, so those ranges are ignored in .github/dependabot.yml — verified with
 # `pip install --dry-run` on a 3.9 venv before pinning.
 fastapi>=0.115
-uvicorn[standard]>=0.30
+uvicorn[standard]>=0.39.0
