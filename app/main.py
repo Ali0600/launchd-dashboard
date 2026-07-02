@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import launchd
+from . import launchd, ports
 
 app = FastAPI(title="launchd dashboard")
 
@@ -60,6 +60,23 @@ def api_enable(label: str) -> dict:
 def api_disable(label: str) -> dict:
     _plist_or_404(label)
     return launchd.set_enabled(label, False)
+
+
+@app.get("/api/ports")
+def api_ports(all: bool = False) -> JSONResponse:
+    # vendor agents included on purpose: a vendor job holding a port is still
+    # the answer to "who has :XXXX?"
+    agents = launchd.list_agents(include_vendor=True)
+    agent_pids = {a["pid"]: a["label"] for a in agents if a["pid"]}
+    entries = ports.list_ports(agent_pids)
+    if not all:
+        entries = [e for e in entries if not e["system"]]
+    return JSONResponse(entries)
+
+
+@app.post("/api/ports/{pid}/kill")
+def api_kill_port(pid: int) -> dict:
+    return ports.kill_listener(pid)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -129,6 +146,18 @@ PAGE = """<!DOCTYPE html>
     <div class="loghead"><span class="mono" id="logpath"></span><span id="lognote"></span></div>
     <pre class="log" id="log"></pre>
   </div>
+  <div class="section" style="display:flex;align-items:center;justify-content:space-between">
+    <span>Listening ports</span>
+    <span style="display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0">
+      <span id="portverdict"></span>
+      <input class="mono" id="portcheck" placeholder="port free?" inputmode="numeric"
+             style="width:90px;background:#1d212a;border:0.5px solid #333845;border-radius:8px;
+                    color:#d7dae1;padding:5px 9px;font-size:12px"/>
+      <label class="muted" style="display:flex;align-items:center;gap:6px;font-size:12px">
+        <input type="checkbox" id="showSystem"/> show system</label>
+    </span>
+  </div>
+  <div class="list" id="portlist"><div class="empty">Loading…</div></div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -203,9 +232,63 @@ let toastT;
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.style.display = "block";
   clearTimeout(toastT); toastT = setTimeout(() => t.style.display = "none", 2600); }
 
-$("refresh").onclick = load;
+// ---- Listening ports ------------------------------------------------------
+let portData = [];   // always the FULL list — the free-checker must see hidden system ports too
+let armedKill = null; // pid armed for two-tap confirm
+
+async function loadPorts() {
+  const r = await fetch(`/api/ports?all=true`);
+  portData = await r.json();
+  armedKill = null;
+  const shown = $("showSystem").checked ? portData : portData.filter(p => !p.system);
+  if (!shown.length) { $("portlist").innerHTML = `<div class="empty">Nothing is listening.</div>`; checkPort(); return; }
+  $("portlist").innerHTML = shown.map(p => {
+    const where = p.project || p.cwd || "";
+    const agent = p.agent ? ` <span class="pill run mono">${p.agent}</span>` : "";
+    const exposed = p.localhost ? "" : ` <span class="pill bad" title="bound beyond loopback — reachable from the LAN">exposed</span>`;
+    const sys = p.system ? ` <span class="pill off">system</span>` : "";
+    return `<div class="row">
+      <span class="dot ${p.localhost ? "ok" : "bad"}"></span>
+      <div class="meta">
+        <div class="lbl mono">:${p.port} <span class="muted" style="font-weight:400">· ${p.command}</span></div>
+        <div class="sub mono" title="${(p.args || "").replace(/"/g, "&quot;")}">${where || "—"} · pid ${p.pid} · ${p.addresses.join(", ")}</div>
+      </div>${agent}${exposed}${sys}
+      <button class="icon" id="kill-${p.pid}" title="SIGTERM this process" onclick="killPort(${p.pid})">✕</button>
+    </div>`;
+  }).join("");
+  checkPort();
+}
+
+async function killPort(pid) {
+  if (armedKill !== pid) {           // two-tap confirm: first tap arms
+    armedKill = pid;
+    const b = $(`kill-${pid}`);
+    b.textContent = "sure?"; b.style.width = "auto"; b.style.padding = "6px 8px"; b.style.color = "#f08b86";
+    setTimeout(() => { if (armedKill === pid) { armedKill = null; loadPorts(); } }, 3000);
+    return;
+  }
+  armedKill = null;
+  const r = await fetch(`/api/ports/${pid}/kill`, { method: "POST" });
+  const j = await r.json();
+  toast(j.ok ? `kill: pid ${pid} ✓` : `kill failed: ${j.detail}`);
+  setTimeout(loadPorts, 800);
+}
+
+function checkPort() {
+  const v = $("portcheck").value.trim();
+  const el = $("portverdict");
+  if (!/^\\d+$/.test(v)) { el.textContent = ""; return; }
+  const hit = portData.find(p => p.port === Number(v));
+  if (hit) { el.innerHTML = `<span class="pill bad">taken · ${hit.command}</span>`; }
+  else { el.innerHTML = `<span class="pill ok">free</span>`; }
+}
+
+function loadAll() { load(); loadPorts(); }
+$("refresh").onclick = loadAll;
 $("showVendor").onchange = load;
-load();
-setInterval(load, 30000);
+$("showSystem").onchange = loadPorts;
+$("portcheck").oninput = checkPort;
+loadAll();
+setInterval(loadAll, 30000);
 </script></body></html>
 """

@@ -19,6 +19,11 @@ deterministic and read-honest.
 - **Log tail** straight from each job's `StandardOutPath`, and a **last-run** time from
   the log's mtime.
 - **One-click control**: run-now (`kickstart`), stop (`kill`), enable/disable.
+- **Port tracker**: every listening TCP port on the machine, attributed to its process,
+  **the project directory it belongs to** (cwd, or mined from the command line), and the
+  launchd agent it runs under — plus a "is port X free?" checker, an **exposed** flag for
+  ports bound beyond loopback, and a two-tap SIGTERM for reclaiming a port. Apple system
+  listeners (AirPlay etc.) are hidden by default but still count as "taken".
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 
@@ -52,6 +57,8 @@ Now `http://127.0.0.1:8787` is always up, and the dashboard lists itself.
 | POST | `/api/agents/{label}/run` | run now (`launchctl kickstart -k`) |
 | POST | `/api/agents/{label}/stop` | stop (`launchctl kill TERM`) |
 | POST | `/api/agents/{label}/{enable,disable}` | toggle |
+| GET | `/api/ports?all=false` | listening TCP ports with process/project/agent attribution (`all=true` includes system listeners) |
+| POST | `/api/ports/{pid}/kill` | SIGTERM a listener (refused unless the pid currently holds a listening port) |
 
 ## Security
 The control endpoints mutate real jobs, so the server **binds to `127.0.0.1` only** —
@@ -66,9 +73,16 @@ agents, no `sudo` required.
   inform the running/idle/unloaded split.
 - **Control**: modern `launchctl` subcommands in the `gui/<uid>` domain
   (`kickstart` / `kill` / `enable` / `disable`).
+- **Ports**: `lsof -iTCP -sTCP:LISTEN` in machine-parsable `-F` field mode (no column
+  guessing), enriched per pid with `lsof -d cwd` (working directory → project) and `ps`
+  (full command line + parent pid). Agent attribution **walks the ppid chain** into the
+  agents' pids, because the listener is usually a child of the agent's process
+  (`run.sh` → `uvicorn`). No `sudo`: user processes only — which is exactly the
+  dev-server population.
 
-The pure parsers (`humanize_schedule`, `next_run`, `parse_launchctl_list`) are unit-tested
-against fixtures, so the logic is verified without a live machine.
+The pure parsers (`humanize_schedule`, `next_run`, `parse_launchctl_list`, and everything
+in `app/ports.py`) are unit-tested against fixtures, so the logic is verified without a
+live machine.
 
 ## Experience gained
 - Designed and built a **self-hosted observability + control plane** for macOS scheduled
@@ -81,3 +95,7 @@ against fixtures, so the logic is verified without a live machine.
   testability.
 - Packaged the tool to **self-host as a launchd agent**, demonstrating service
   lifecycle management and localhost-only security scoping.
+- Built a **network-port observability layer** (`lsof`/`ps` field-mode parsing, process →
+  project attribution via working directory and command-line mining, parent-pid chain
+  walking to link sockets to their managing service) with guarded process control and
+  loopback-vs-LAN bind auditing.
