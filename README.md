@@ -24,6 +24,12 @@ deterministic and read-honest.
   launchd agent it runs under — plus a "is port X free?" checker, an **exposed** flag for
   ports bound beyond loopback, and a two-tap SIGTERM for reclaiming a port. Apple system
   listeners (AirPlay etc.) are hidden by default but still count as "taken".
+- **App launcher**: declare your dev servers once in `apps.json` (dir, command, port) and
+  start/stop them from the dashboard — no more hunting terminals for `npm run dev`. Each
+  launched app runs as a **transient launchd agent** (`com.launchddash.app.<slug>`), so
+  status, last-exit health, log tailing, and port→app attribution all come from the same
+  machinery as everything else; stopping removes the agent completely. Apps in
+  TCC-protected folders are shown as blocked with the reason instead of failing cryptically.
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 
@@ -71,6 +77,29 @@ out of TCC-protected folders (see Quickstart) and adjust the paths.
 | POST | `/api/agents/{label}/{enable,disable}` | toggle |
 | GET | `/api/ports?all=false` | listening TCP ports with process/project/agent attribution (`all=true` includes system listeners) |
 | POST | `/api/ports/{pid}/kill` | SIGTERM a listener (refused unless the pid currently holds a listening port) |
+| GET | `/api/apps` | configured apps with live status (running/stopped/exited/failed/blocked) |
+| POST | `/api/apps/{slug}/{start,stop}` | launch as / remove a transient launchd agent (slugs only — commands never cross HTTP) |
+| GET | `/api/apps/{slug}/log?lines=200` | tail a launched app's log |
+
+## Launch your dev apps
+
+Copy `apps.json.example` to `apps.json` (gitignored — it holds machine-specific paths) and
+list your projects:
+
+```json
+[
+  { "slug": "web", "name": "My web app", "dir": "~/my-web-app",
+    "command": "npm run dev", "port": 3000 }
+]
+```
+
+Start writes a `com.launchddash.app.<slug>` plist (`RunAtLoad`, deliberately **no
+`KeepAlive`** — a crashed dev server should read as failed, not restart-loop), logs to
+`~/Library/Logs/launchddash/<slug>.log`, and bootstraps it; Stop boots it out **and deletes
+the plist**, so nothing lingers in your login items. Generated plists bake a launchd-safe
+`PATH` (homebrew, `~/.local/bin`, the newest fnm node) because agents don't get your shell
+profile. The TCC rule from Quickstart applies to every app too: projects must live outside
+`~/Documents`/`~/Desktop`/`~/Downloads`, and the dashboard marks offenders as blocked.
 
 ## Security
 The control endpoints mutate real jobs, so the server **binds to `127.0.0.1` only** —

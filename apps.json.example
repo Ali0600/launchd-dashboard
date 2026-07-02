@@ -1,0 +1,16 @@
+[
+  {
+    "slug": "my-web-app",
+    "name": "My web app (dev)",
+    "dir": "~/my-web-app",
+    "command": "npm run dev",
+    "port": 3000
+  },
+  {
+    "slug": "my-api",
+    "name": "My API (uvicorn)",
+    "dir": "~/my-api",
+    "command": ".venv/bin/uvicorn app.main:app --port 8001",
+    "port": 8001
+  }
+]

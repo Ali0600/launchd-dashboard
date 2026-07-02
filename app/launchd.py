@@ -294,6 +294,10 @@ def list_agents(include_vendor: bool = False) -> list[dict]:
         if label in seen:
             continue
         seen.add(label)
+        # Dashboard-launched apps (com.launchddash.app.*) live in the Apps section,
+        # not here — double-listing them as agents would just be noise.
+        if label.startswith("com.launchddash.app."):
+            continue
         if not include_vendor and is_vendor(label):
             continue
         agents.append(build_agent(path, plist))

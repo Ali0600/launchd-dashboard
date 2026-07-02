@@ -10,9 +10,16 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import launchd, ports
+from . import apps, launchd, ports
 
 app = FastAPI(title="launchd dashboard")
+
+
+def _app_or_404(slug: str) -> apps.AppSpec:
+    for spec in apps.load_apps():
+        if spec.slug == slug:
+            return spec
+    raise HTTPException(status_code=404, detail=f"no app {slug!r} in apps.json")
 
 
 def _plist_or_404(label: str) -> dict:
@@ -62,12 +69,39 @@ def api_disable(label: str) -> dict:
     return launchd.set_enabled(label, False)
 
 
+@app.get("/api/apps")
+def api_apps() -> JSONResponse:
+    return JSONResponse([apps.describe(spec) for spec in apps.load_apps()])
+
+
+@app.post("/api/apps/{slug}/start")
+def api_app_start(slug: str) -> dict:
+    return apps.start_app(_app_or_404(slug))
+
+
+@app.post("/api/apps/{slug}/stop")
+def api_app_stop(slug: str) -> dict:
+    return apps.stop_app(_app_or_404(slug))
+
+
+@app.get("/api/apps/{slug}/log")
+def api_app_log(slug: str, lines: int = 200) -> dict:
+    spec = _app_or_404(slug)
+    return launchd.read_log_tail({"StandardOutPath": str(spec.log_path)}, lines=lines)
+
+
 @app.get("/api/ports")
 def api_ports(all: bool = False) -> JSONResponse:
     # vendor agents included on purpose: a vendor job holding a port is still
     # the answer to "who has :XXXX?"
     agents = launchd.list_agents(include_vendor=True)
     agent_pids = {a["pid"]: a["label"] for a in agents if a["pid"]}
+    # Dashboard-launched apps are filtered out of list_agents (they live in the Apps
+    # section), so add their pids here or their ports would lose attribution.
+    for spec in apps.load_apps():
+        info = apps.describe(spec)
+        if info["pid"]:
+            agent_pids[info["pid"]] = spec.label
     entries = ports.list_ports(agent_pids)
     if not all:
         entries = [e for e in entries if not e["system"]]
@@ -140,6 +174,8 @@ PAGE = """<!DOCTYPE html>
     </div>
   </header>
   <div class="cards" id="cards"></div>
+  <div class="section" id="appsec" style="display:none">Apps</div>
+  <div class="list" id="applist" style="display:none"></div>
   <div class="section">Agents</div>
   <div class="list" id="list"><div class="empty">Loading…</div></div>
   <div class="logwrap" id="logwrap">
@@ -232,6 +268,61 @@ let toastT;
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.style.display = "block";
   clearTimeout(toastT); toastT = setTimeout(() => t.style.display = "none", 2600); }
 
+// ---- Apps (dev servers launched as transient launchd agents) ---------------
+async function loadApps() {
+  const r = await fetch("/api/apps");
+  const apps = await r.json();
+  const show = apps.length > 0;
+  $("appsec").style.display = show ? "" : "none";
+  $("applist").style.display = show ? "" : "none";
+  if (!show) return;
+  $("applist").innerHTML = apps.map(a => {
+    const dot = a.blocked ? "bad" : a.status === "running" ? "run" : a.status === "failed" ? "bad" : "off";
+    const pill = a.blocked ? `<span class="pill bad">blocked</span>`
+      : a.status === "running" ? `<span class="pill run">running</span>`
+      : a.status === "failed" ? `<span class="pill bad">failed</span>`
+      : `<span class="pill off">${a.status}</span>`;
+    const port = a.port ? ` <span class="muted" style="font-weight:400">· :${a.port}</span>` : "";
+    const sub = a.blocked
+      ? `<span style="color:#f08b86">${a.dir} is TCC-protected — move it out of Documents/Desktop/Downloads to launch</span>`
+      : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}`;
+    const open = a.status === "running" && a.port
+      ? `<button onclick="window.open('http://127.0.0.1:${a.port}','_blank')" title="Open in browser">↗</button>` : "";
+    const action = a.blocked ? ""
+      : a.status === "running"
+        ? `<button class="icon" title="Stop" onclick="appAct('${a.slug}','stop')">■</button>`
+        : `<button class="icon" title="Start" onclick="appAct('${a.slug}','start')">▶</button>`;
+    return `<div class="row">
+      <span class="dot ${dot}"></span>
+      <div class="meta">
+        <div class="lbl mono">${a.name}${port}</div>
+        <div class="sub">${sub}</div>
+      </div>
+      ${pill}${open}${action}
+      <button class="icon" title="Logs" onclick="showAppLog('${a.slug}')">≣</button>
+    </div>`;
+  }).join("");
+}
+
+async function appAct(slug, what) {
+  const r = await fetch(`/api/apps/${encodeURIComponent(slug)}/${what}`, { method: "POST" });
+  const j = await r.json();
+  toast(j.ok ? `${what}: ${slug} ✓` : `${what} failed: ${j.detail}`);
+  setTimeout(() => { loadApps(); loadPorts(); }, 900);
+}
+
+async function showAppLog(slug) {
+  if (openLog === "app:" + slug) { $("logwrap").classList.remove("open"); openLog = null; return; }
+  openLog = "app:" + slug;
+  const r = await fetch(`/api/apps/${encodeURIComponent(slug)}/log?lines=300`);
+  const j = await r.json();
+  $("logpath").textContent = j.path || slug;
+  $("lognote").textContent = j.note || "";
+  $("log").textContent = j.text || "(empty)";
+  $("logwrap").classList.add("open");
+  $("logwrap").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 // ---- Listening ports ------------------------------------------------------
 let portData = [];   // always the FULL list — the free-checker must see hidden system ports too
 let armedKill = null; // pid armed for two-tap confirm
@@ -283,7 +374,7 @@ function checkPort() {
   else { el.innerHTML = `<span class="pill ok">free</span>`; }
 }
 
-function loadAll() { load(); loadPorts(); }
+function loadAll() { load(); loadApps(); loadPorts(); }
 $("refresh").onclick = loadAll;
 $("showVendor").onchange = load;
 $("showSystem").onchange = loadPorts;
