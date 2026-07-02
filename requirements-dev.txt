@@ -1,5 +1,5 @@
 -r requirements.txt
 # pytest 9+ requires Python >=3.10; the local venv is 3.9 (see requirements.txt).
-pytest>=8.0
+pytest>=8.4.2
 httpx>=0.28.1
 ruff>=0.15.20
