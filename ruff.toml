@@ -1,0 +1,12 @@
+# Targets the lowest Python we run — the local dev venv is 3.9, CI is 3.12 —
+# so lint never pushes 3.10+ syntax that would break local dev. Rule set kept
+# pragmatic: real bugs (pyflakes F), syntax/whitespace (E/W), import order (I);
+# line-length checks (E501) left off to avoid reflow churn.
+target-version = "py39"
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F", "W", "I"]
+
+[lint.isort]
+known-first-party = ["app"]
