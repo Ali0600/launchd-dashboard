@@ -10,6 +10,17 @@ updates:
       pip-minor-patch:
         patterns: ['*']
         update-types: ['minor', 'patch']
+    # The local dev venv is system Python 3.9 (run.sh); these ranges require
+    # >=3.10, so a floor bump into them makes the requirements uninstallable
+    # locally even though CI (3.12) stays green. NOTE: ignore also suppresses
+    # security PRs for these ranges — acceptable for a localhost-only tool.
+    ignore:
+      - dependency-name: fastapi
+        versions: ['>=0.129.0']
+      - dependency-name: uvicorn
+        versions: ['>=0.40.0']
+      - dependency-name: pytest
+        versions: ['>=9.0.0']
 
   - package-ecosystem: github-actions
     directory: /

@@ -1,2 +1,6 @@
+# Floors must stay installable on Python 3.9: run.sh builds the venv with the
+# system python3 (3.9 on macOS). fastapi 0.129+ and uvicorn 0.40+ require
+# >=3.10, so those ranges are ignored in .github/dependabot.yml — verified with
+# `pip install --dry-run` on a 3.9 venv before pinning.
 fastapi>=0.115
-uvicorn[standard]>=0.49.0
+uvicorn[standard]>=0.30
