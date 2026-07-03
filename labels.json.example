@@ -1,0 +1,11 @@
+{
+  "com.example.backup": {
+    "purpose": "nightly offsite backup",
+    "repo": "~/backup-scripts",
+    "note": "Runs restic against B2; safe to kickstart manually."
+  },
+  "com.launchddash.server": {
+    "purpose": "this dashboard",
+    "repo": "~/launchd-dashboard"
+  }
+}
