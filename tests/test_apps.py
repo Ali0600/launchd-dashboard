@@ -147,10 +147,17 @@ def test_stop_keeps_plist_for_login_apps(monkeypatch, tmp_path):
     assert res["ok"] and not plist.exists()
 
 
-def test_restart_boots_out_then_starts(monkeypatch):
+def test_restart_waits_for_unload_before_starting(monkeypatch):
     calls = []
+    order = []
+    # The dying job stays "loaded" for two polls before unloading — restart must
+    # not hand off to start_app until it's gone (else "already running" wins).
+    states = iter([{"loaded": True, "pid": 1}, {"loaded": True}, {"loaded": False}])
     monkeypatch.setattr(apps, "_run", lambda cmd: (calls.append(cmd), type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})())[1])
-    monkeypatch.setattr(apps, "start_app", lambda s: {"ok": True, "detail": "started"})
+    monkeypatch.setattr(apps, "launchctl_state", lambda label: (order.append("poll"), next(states))[1])
+    monkeypatch.setattr(apps, "start_app", lambda s: (order.append("start"), {"ok": True, "detail": "started"})[1])
+    monkeypatch.setattr(apps.time, "sleep", lambda s: None)
     res = apps.restart_app(spec())
     assert res["ok"]
-    assert calls and calls[0][:2] == ["launchctl", "bootout"]
+    assert calls[0][:2] == ["launchctl", "bootout"]
+    assert order == ["poll", "poll", "poll", "start"]  # start only after unload
