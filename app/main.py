@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import apps, launchd, ports
+from . import annotations, apps, launchd, ports
 
 app = FastAPI(title="launchd dashboard")
 
@@ -37,7 +37,11 @@ def health() -> dict:
 
 @app.get("/api/agents")
 def api_agents(all: bool = False) -> JSONResponse:
-    return JSONResponse(launchd.list_agents(include_vendor=all))
+    notes = annotations.load_annotations()
+    agents = launchd.list_agents(include_vendor=all)
+    for a in agents:
+        a["annotation"] = notes.get(a["label"])
+    return JSONResponse(agents)
 
 
 @app.get("/api/agents/{label}/log")
@@ -71,7 +75,13 @@ def api_disable(label: str) -> dict:
 
 @app.get("/api/apps")
 def api_apps() -> JSONResponse:
-    return JSONResponse([apps.describe(spec) for spec in apps.load_apps()])
+    notes = annotations.load_annotations()
+    out = []
+    for spec in apps.load_apps():
+        info = apps.describe(spec)
+        info["annotation"] = notes.get(spec.label)
+        out.append(info)
+    return JSONResponse(out)
 
 
 @app.post("/api/apps/{slug}/start")
@@ -230,11 +240,13 @@ async function load() {
       : a.healthy ? `<span class="pill ${a.status==='running'?'run':'ok'}">${a.status}</span>`
       : `<span class="pill bad">failed</span>`;
     const next = a.next_run ? ` · next ${rel(a.next_run)}` : "";
-    return `<div class="row">
+    const note = a.annotation?.purpose ? ` · <span style="color:#aeb4c0">${a.annotation.purpose}</span>` : "";
+    const hover = a.annotation ? [a.annotation.note, a.annotation.repo].filter(Boolean).join(" — ") : "";
+    return `<div class="row" ${hover ? `title="${hover.replace(/"/g, '&quot;')}"` : ""}>
       <span class="dot ${dot}"></span>
       <div class="meta">
         <div class="lbl mono">${a.label}${a.vendor ? ' <span class="muted" style="font-weight:400">· vendor</span>' : ''}</div>
-        <div class="sub">${a.schedule}${exit} · ran ${rel(a.last_run)}${next}</div>
+        <div class="sub">${a.schedule}${exit} · ran ${rel(a.last_run)}${next}${note}</div>
       </div>
       ${pill}
       <button class="icon" title="Run now" onclick="act('${a.label}','run')">▶</button>
@@ -283,9 +295,10 @@ async function loadApps() {
       : a.status === "failed" ? `<span class="pill bad">failed</span>`
       : `<span class="pill off">${a.status}</span>`;
     const port = a.port ? ` <span class="muted" style="font-weight:400">· :${a.port}</span>` : "";
+    const note = a.annotation?.purpose ? ` · <span style="color:#aeb4c0">${a.annotation.purpose}</span>` : "";
     const sub = a.blocked
       ? `<span style="color:#f08b86">${a.dir} is TCC-protected — move it out of Documents/Desktop/Downloads to launch</span>`
-      : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}`;
+      : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}${note}`;
     const open = a.status === "running" && a.port
       ? `<button onclick="window.open('http://127.0.0.1:${a.port}','_blank')" title="Open in browser">↗</button>` : "";
     const action = a.blocked ? ""

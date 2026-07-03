@@ -17,3 +17,6 @@ com.launchddash.server.plist
 
 # Personal app launcher config (machine-specific paths; see apps.json.example)
 apps.json
+
+# Personal job annotations (machine-specific; see labels.json.example)
+labels.json
