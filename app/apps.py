@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .launchd import launchctl_state
+from .launchd import invalidate_state, launchctl_state
 
 
 def warn(msg: str) -> None:
@@ -243,6 +243,7 @@ def start_app(spec: AppSpec) -> dict:
     if state.get("loaded"):  # a previous run's job is still registered — clear it first
         _run(["launchctl", "bootout", f"gui/{os.getuid()}/{spec.label}"])
     res = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(file)])
+    invalidate_state(spec.label)
     if res.returncode != 0:
         return {"ok": False, "detail": (res.stderr or res.stdout).strip() or "bootstrap failed"}
     return {"ok": True, "detail": f"started {spec.label}"}
@@ -250,6 +251,7 @@ def start_app(spec: AppSpec) -> dict:
 
 def stop_app(spec: AppSpec) -> dict:
     res = _run(["launchctl", "bootout", f"gui/{os.getuid()}/{spec.label}"])
+    invalidate_state(spec.label)
     if spec.login:
         # Keep the plist: the app stays stopped now but comes back at next login.
         suffix = " (plist kept — starts at login)"
@@ -270,4 +272,5 @@ def restart_app(spec: AppSpec) -> dict:
     """Bootout (ignore result — it may simply not be running) then a fresh start,
     which rewrites the plist, so config edits are picked up on restart."""
     _run(["launchctl", "bootout", f"gui/{os.getuid()}/{spec.label}"])
+    invalidate_state(spec.label)
     return start_app(spec)

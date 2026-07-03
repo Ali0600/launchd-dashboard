@@ -194,7 +194,12 @@ PAGE = """<!DOCTYPE html>
   <div class="section">Agents</div>
   <div class="list" id="list"><div class="empty">Loading…</div></div>
   <div class="logwrap" id="logwrap">
-    <div class="loghead"><span class="mono" id="logpath"></span><span id="lognote"></span></div>
+    <div class="loghead"><span class="mono" id="logpath"></span>
+      <span style="display:flex;gap:12px;align-items:center"><span id="lognote"></span>
+        <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px">
+          <input type="checkbox" id="follow"/> follow</label>
+      </span>
+    </div>
     <pre class="log" id="log"></pre>
   </div>
   <div class="section" style="display:flex;align-items:center;justify-content:space-between">
@@ -269,16 +274,36 @@ async function act(label, what) {
   if (openLog === label) setTimeout(() => showLog(label, true), 800);
 }
 
-async function showLog(label, keep) {
-  if (openLog === label && !keep) { $("logwrap").classList.remove("open"); openLog = null; return; }
-  openLog = label;
-  const r = await fetch(`/api/agents/${encodeURIComponent(label)}/log?lines=300`);
+let logURL = null;
+
+async function refreshLog(fallbackTitle) {
+  if (!openLog || !logURL) return;
+  const r = await fetch(logURL);
   const j = await r.json();
-  $("logpath").textContent = j.path || label;
+  $("logpath").textContent = j.path || fallbackTitle || "";
   $("lognote").textContent = j.note || "";
-  $("log").textContent = j.text || "(empty)";
+  const el = $("log");
+  // Keep the view pinned to the bottom while following, unless the user scrolled up.
+  const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  el.textContent = j.text || "(empty)";
+  if (pinned) el.scrollTop = el.scrollHeight;
+}
+
+async function openLogPanel(key, url, title) {
+  if (openLog === key) { $("logwrap").classList.remove("open"); openLog = null; logURL = null; return; }
+  openLog = key;
+  logURL = url;
+  await refreshLog(title);
   $("logwrap").classList.add("open");
   $("logwrap").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// The follow ticker no-ops unless the panel is open and the box is checked.
+setInterval(() => { if ($("follow").checked) refreshLog(); }, 2000);
+
+async function showLog(label, keep) {
+  if (keep && openLog === label) { await refreshLog(label); return; }
+  await openLogPanel(label, `/api/agents/${encodeURIComponent(label)}/log?lines=300`, label);
 }
 
 let toastT;
@@ -332,15 +357,7 @@ async function appAct(slug, what) {
 }
 
 async function showAppLog(slug) {
-  if (openLog === "app:" + slug) { $("logwrap").classList.remove("open"); openLog = null; return; }
-  openLog = "app:" + slug;
-  const r = await fetch(`/api/apps/${encodeURIComponent(slug)}/log?lines=300`);
-  const j = await r.json();
-  $("logpath").textContent = j.path || slug;
-  $("lognote").textContent = j.note || "";
-  $("log").textContent = j.text || "(empty)";
-  $("logwrap").classList.add("open");
-  $("logwrap").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  await openLogPanel("app:" + slug, `/api/apps/${encodeURIComponent(slug)}/log?lines=300`, slug);
 }
 
 // ---- Listening ports ------------------------------------------------------

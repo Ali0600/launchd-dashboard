@@ -67,6 +67,26 @@ def test_is_vendor():
     assert not launchd.is_vendor("com.groceryhelper.recipes")
 
 
+def test_launchctl_state_ttl_memo(monkeypatch):
+    calls = []
+
+    def fake_live(label):
+        calls.append(label)
+        return {"loaded": True, "pid": 1}
+
+    monkeypatch.setattr(launchd, "_launchctl_state_live", fake_live)
+    launchd.invalidate_state()  # isolate from other tests
+    launchd.launchctl_state("com.x", now=100.0)
+    launchd.launchctl_state("com.x", now=102.0)  # within TTL — served from cache
+    assert calls == ["com.x"]
+    launchd.launchctl_state("com.x", now=106.0)  # past the 5s TTL — refetched
+    assert calls == ["com.x", "com.x"]
+    launchd.invalidate_state("com.x")  # a mutation dropped it
+    launchd.launchctl_state("com.x", now=106.5)
+    assert len(calls) == 3
+    launchd.invalidate_state()
+
+
 def test_is_healthy():
     assert launchd.is_healthy(None, None)      # never ran
     assert launchd.is_healthy(None, 0)         # clean last exit
