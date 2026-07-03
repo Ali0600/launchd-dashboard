@@ -12,6 +12,7 @@ import os
 import plistlib
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -98,8 +99,7 @@ def parse_launchctl_list(output: str) -> dict:
     return out
 
 
-def launchctl_state(label: str) -> dict:
-    """Live state for one label. {} (with loaded=False) when not bootstrapped."""
+def _launchctl_state_live(label: str) -> dict:
     try:
         res = subprocess.run(
             ["launchctl", "list", label],
@@ -111,6 +111,34 @@ def launchctl_state(label: str) -> dict:
         return {"loaded": False}
     state = parse_launchctl_list(res.stdout)
     state["loaded"] = True
+    return state
+
+
+# The UI polls agents + apps + ports every 30s and each endpoint used to shell out
+# one `launchctl list` per label — dozens of subprocesses per refresh. A short TTL
+# memo makes one sweep serve all three; control actions invalidate so a click's
+# follow-up refresh never shows pre-action state.
+_STATE_TTL_S = 5.0
+_state_cache: dict = {}
+
+
+def invalidate_state(label: Optional[str] = None) -> None:
+    """Drop cached state after a mutation (run/stop/enable/bootstrap/bootout)."""
+    if label is None:
+        _state_cache.clear()
+    else:
+        _state_cache.pop(label, None)
+
+
+def launchctl_state(label: str, now: Optional[float] = None) -> dict:
+    """Live state for one label, memoized for a few seconds. {} (with loaded=False)
+    when not bootstrapped. `now` is injectable for tests."""
+    t = time.monotonic() if now is None else now
+    hit = _state_cache.get(label)
+    if hit and t - hit[0] < _STATE_TTL_S:
+        return hit[1]
+    state = _launchctl_state_live(label)
+    _state_cache[label] = (t, state)
     return state
 
 
@@ -334,12 +362,15 @@ def _target(label: str) -> str:
 
 def run_now(label: str) -> dict:
     # -k restarts if already running; for an idle on-demand job it just fires it.
+    invalidate_state(label)
     return _run(["launchctl", "kickstart", "-k", _target(label)])
 
 
 def stop(label: str) -> dict:
+    invalidate_state(label)
     return _run(["launchctl", "kill", "TERM", _target(label)])
 
 
 def set_enabled(label: str, enabled: bool) -> dict:
+    invalidate_state(label)
     return _run(["launchctl", "enable" if enabled else "disable", _target(label)])

@@ -140,3 +140,12 @@ live machine.
   project attribution via working directory and command-line mining, parent-pid chain
   walking to link sockets to their managing service) with guarded process control and
   loopback-vs-LAN bind auditing.
+- Extended the control plane into a **config-driven dev-app launcher**: dynamic launchd
+  plist generation with hermetic `PATH` construction for daemon contexts, full lifecycle
+  management (start/stop/restart, optional start-at-login persistence, per-app environment),
+  and slug-only HTTP surface so commands never cross the wire.
+- Diagnosed and productized a **macOS sandbox (TCC) failure mode**: distinguished
+  EPERM-vs-EACCES semantics, relocated agent-run code out of privacy-protected folders, and
+  encoded the constraint as a first-class "blocked" state in the UI instead of a cryptic error.
+- Cut steady-state overhead with a **TTL-memoized subprocess layer** (one `launchctl` sweep
+  serves three polling endpoints, invalidated on every mutation so actions never read stale).
