@@ -94,6 +94,11 @@ def api_app_stop(slug: str) -> dict:
     return apps.stop_app(_app_or_404(slug))
 
 
+@app.post("/api/apps/{slug}/restart")
+def api_app_restart(slug: str) -> dict:
+    return apps.restart_app(_app_or_404(slug))
+
+
 @app.get("/api/apps/{slug}/log")
 def api_app_log(slug: str, lines: int = 200) -> dict:
     spec = _app_or_404(slug)
@@ -303,12 +308,14 @@ async function loadApps() {
       ? `<button onclick="window.open('http://127.0.0.1:${a.port}','_blank')" title="Open in browser">↗</button>` : "";
     const action = a.blocked ? ""
       : a.status === "running"
-        ? `<button class="icon" title="Stop" onclick="appAct('${a.slug}','stop')">■</button>`
+        ? `<button class="icon" title="Restart" onclick="appAct('${a.slug}','restart')">↻</button>
+           <button class="icon" title="Stop" onclick="appAct('${a.slug}','stop')">■</button>`
         : `<button class="icon" title="Start" onclick="appAct('${a.slug}','start')">▶</button>`;
+    const login = a.login ? ' <span class="muted" style="font-weight:400;font-size:11px">· at login</span>' : "";
     return `<div class="row">
       <span class="dot ${dot}"></span>
       <div class="meta">
-        <div class="lbl mono">${a.name}${port}</div>
+        <div class="lbl mono">${a.name}${login}${port}</div>
         <div class="sub">${sub}</div>
       </div>
       ${pill}${open}${action}
