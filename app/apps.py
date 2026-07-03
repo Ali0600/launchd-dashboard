@@ -19,6 +19,7 @@ import plistlib
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -270,7 +271,17 @@ def stop_app(spec: AppSpec) -> dict:
 
 def restart_app(spec: AppSpec) -> dict:
     """Bootout (ignore result — it may simply not be running) then a fresh start,
-    which rewrites the plist, so config edits are picked up on restart."""
+    which rewrites the plist, so config edits are picked up on restart.
+
+    bootout returns while the old process is still dying, and start_app's
+    already-running check would see that dying pid and skip the bootstrap
+    entirely (found live: restart left nothing running). Wait for the job to
+    actually unload before starting."""
     _run(["launchctl", "bootout", f"gui/{os.getuid()}/{spec.label}"])
+    for _ in range(20):  # up to ~5s for SIGTERM to land and the job to unload
+        invalidate_state(spec.label)
+        if not launchctl_state(spec.label).get("loaded"):
+            break
+        time.sleep(0.25)
     invalidate_state(spec.label)
     return start_app(spec)
