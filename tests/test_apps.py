@@ -113,3 +113,44 @@ def test_is_app_label_and_agents_filter():
     assert apps.is_app_label("com.launchddash.app.web")
     assert not apps.is_app_label("com.launchddash.server")
     assert not apps.is_app_label("com.groceryhelper.recipes")
+
+
+def test_parse_apps_login_and_env():
+    raw = """[
+      {"slug": "a", "dir": "~/a", "command": "run", "login": true,
+       "env": {"CI": "1", "NUM": 2}},
+      {"slug": "b", "dir": "~/b", "command": "run", "env": "not-a-dict"}
+    ]"""
+    a, b = apps.parse_apps(raw, home=HOME)
+    assert a.login is True
+    assert a.env == {"CI": "1", "NUM": "2"}  # values coerced to strings
+    assert b.login is False
+    assert b.env is None
+
+
+def test_render_plist_merges_app_env_over_base():
+    d = apps.render_plist(spec(env={"CI": "1", "PATH": "/custom"}), path_env="/base")
+    assert d["EnvironmentVariables"]["CI"] == "1"
+    assert d["EnvironmentVariables"]["PATH"] == "/custom"  # per-app override wins
+    assert "HOME" in d["EnvironmentVariables"]
+
+
+def test_stop_keeps_plist_for_login_apps(monkeypatch, tmp_path):
+    plist = tmp_path / "com.launchddash.app.web.plist"
+    plist.write_text("x")
+    monkeypatch.setattr(apps, "_run", lambda cmd: type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})())
+    monkeypatch.setattr(apps, "_plist_file", lambda s: plist)
+    res = apps.stop_app(spec(login=True))
+    assert res["ok"] and "plist kept" in res["detail"]
+    assert plist.exists()
+    res = apps.stop_app(spec(login=False))
+    assert res["ok"] and not plist.exists()
+
+
+def test_restart_boots_out_then_starts(monkeypatch):
+    calls = []
+    monkeypatch.setattr(apps, "_run", lambda cmd: (calls.append(cmd), type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})())[1])
+    monkeypatch.setattr(apps, "start_app", lambda s: {"ok": True, "detail": "started"})
+    res = apps.restart_app(spec())
+    assert res["ok"]
+    assert calls and calls[0][:2] == ["launchctl", "bootout"]

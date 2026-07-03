@@ -50,6 +50,11 @@ class AppSpec:
     dir: str  # absolute, ~ expanded
     command: str
     port: Optional[int] = None
+    # Keep the plist installed after Stop, so the app comes back at next login.
+    login: bool = False
+    # Extra environment for the generated agent (merged over the baked PATH/HOME) —
+    # the escape hatch for tools that behave differently without a TTY (CI=1 etc.).
+    env: Optional[dict] = None
 
     @property
     def label(self) -> str:
@@ -99,6 +104,7 @@ def parse_apps(raw: str, home: Optional[str] = None) -> list[AppSpec]:
         if directory == "~" or directory.startswith("~/"):
             directory = home + directory[1:]
         port = entry.get("port")
+        env = entry.get("env")
         out.append(
             AppSpec(
                 slug=slug,
@@ -106,6 +112,8 @@ def parse_apps(raw: str, home: Optional[str] = None) -> list[AppSpec]:
                 dir=directory,
                 command=command,
                 port=int(port) if isinstance(port, (int, str)) and str(port).isdigit() else None,
+                login=bool(entry.get("login")),
+                env={str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else None,
             )
         )
         seen.add(slug)
@@ -151,6 +159,8 @@ def robust_path(home: Optional[str] = None) -> str:
 def render_plist(spec: AppSpec, path_env: str) -> dict:
     """The transient agent definition. No KeepAlive on purpose: a crashed dev
     server should read as failed, not thrash in a restart loop."""
+    env = {"PATH": path_env, "HOME": str(Path.home())}
+    env.update(spec.env or {})  # per-app overrides win (CI=1, EXPO_* etc.)
     return {
         "Label": spec.label,
         "ProgramArguments": [
@@ -159,7 +169,7 @@ def render_plist(spec: AppSpec, path_env: str) -> dict:
             f"cd {shquote(spec.dir)} && exec {spec.command}",
         ],
         "WorkingDirectory": spec.dir,
-        "EnvironmentVariables": {"PATH": path_env, "HOME": str(Path.home())},
+        "EnvironmentVariables": env,
         "RunAtLoad": True,
         "StandardOutPath": str(spec.log_path),
         "StandardErrorPath": str(spec.log_path),
@@ -195,6 +205,7 @@ def describe(spec: AppSpec) -> dict:
         "pid": state.get("pid"),
         "last_exit": state.get("last_exit"),
         "blocked": tcc_blocked(spec.dir),
+        "login": spec.login,
         "log_path": str(spec.log_path),
     }
 
@@ -239,12 +250,24 @@ def start_app(spec: AppSpec) -> dict:
 
 def stop_app(spec: AppSpec) -> dict:
     res = _run(["launchctl", "bootout", f"gui/{os.getuid()}/{spec.label}"])
-    try:
-        _plist_file(spec).unlink(missing_ok=True)  # ephemeral: nothing left in login items
-    except OSError as exc:
-        warn(f"could not remove {spec.label} plist: {exc}")
+    if spec.login:
+        # Keep the plist: the app stays stopped now but comes back at next login.
+        suffix = " (plist kept — starts at login)"
+    else:
+        suffix = ""
+        try:
+            _plist_file(spec).unlink(missing_ok=True)  # ephemeral: nothing left in login items
+        except OSError as exc:
+            warn(f"could not remove {spec.label} plist: {exc}")
     if res.returncode != 0:
         detail = (res.stderr or res.stdout).strip()
         # Booting out a job that isn't loaded is a no-op, not an error worth surfacing.
-        return {"ok": True, "detail": detail or "was not running"}
-    return {"ok": True, "detail": f"stopped {spec.label}"}
+        return {"ok": True, "detail": (detail or "was not running") + suffix}
+    return {"ok": True, "detail": f"stopped {spec.label}{suffix}"}
+
+
+def restart_app(spec: AppSpec) -> dict:
+    """Bootout (ignore result — it may simply not be running) then a fresh start,
+    which rewrites the plist, so config edits are picked up on restart."""
+    _run(["launchctl", "bootout", f"gui/{os.getuid()}/{spec.label}"])
+    return start_app(spec)
