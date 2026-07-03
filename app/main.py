@@ -7,10 +7,14 @@ jobs, so the dashboard is not meant to be exposed beyond your machine.
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import annotations, apps, launchd, ports
+from . import annotations, apps, discover, launchd, ports
+
+# Last discovery scan, server-side. Adoption only ever references these by slug —
+# the browser never supplies a directory or command.
+_discovered: list = []
 
 app = FastAPI(title="launchd dashboard")
 
@@ -97,6 +101,23 @@ def api_app_stop(slug: str) -> dict:
 @app.post("/api/apps/{slug}/restart")
 def api_app_restart(slug: str) -> dict:
     return apps.restart_app(_app_or_404(slug))
+
+
+@app.get("/api/apps/discover")
+def api_apps_discover() -> JSONResponse:
+    _discovered.clear()
+    _discovered.extend(discover.discover_apps())
+    return JSONResponse(_discovered)
+
+
+@app.post("/api/apps/adopt")
+def api_apps_adopt(payload: dict = Body(...)) -> dict:
+    slugs = payload.get("slugs")
+    if not isinstance(slugs, list) or not all(isinstance(s, str) for s in slugs):
+        raise HTTPException(status_code=400, detail="body must be {\"slugs\": [\"...\"]}")
+    if not _discovered:
+        raise HTTPException(status_code=409, detail="run a scan first (GET /api/apps/discover)")
+    return discover.adopt_apps(_discovered, slugs)
 
 
 @app.get("/api/apps/{slug}/log")
@@ -189,8 +210,12 @@ PAGE = """<!DOCTYPE html>
     </div>
   </header>
   <div class="cards" id="cards"></div>
-  <div class="section" id="appsec" style="display:none">Apps</div>
-  <div class="list" id="applist" style="display:none"></div>
+  <div class="section" style="display:flex;align-items:center;justify-content:space-between">
+    <span>Apps</span>
+    <button id="scanBtn" onclick="scanApps()" style="text-transform:none;letter-spacing:0;font-size:12px">⌕ Scan for projects</button>
+  </div>
+  <div class="list" id="applist"></div>
+  <div class="list" id="discover" style="display:none;margin-top:10px"></div>
   <div class="section">Agents</div>
   <div class="list" id="list"><div class="empty">Loading…</div></div>
   <div class="logwrap" id="logwrap">
@@ -314,10 +339,10 @@ function toast(msg) { const t = $("toast"); t.textContent = msg; t.style.display
 async function loadApps() {
   const r = await fetch("/api/apps");
   const apps = await r.json();
-  const show = apps.length > 0;
-  $("appsec").style.display = show ? "" : "none";
-  $("applist").style.display = show ? "" : "none";
-  if (!show) return;
+  if (!apps.length) {
+    $("applist").innerHTML = `<div class="empty">No apps configured — scan for projects to add your dev servers, or edit apps.json (see apps.json.example).</div>`;
+    return;
+  }
   $("applist").innerHTML = apps.map(a => {
     const dot = a.blocked ? "bad" : a.status === "running" ? "run" : a.status === "failed" ? "bad" : "off";
     const pill = a.blocked ? `<span class="pill bad">blocked</span>`
@@ -347,6 +372,54 @@ async function loadApps() {
       <button class="icon" title="Logs" onclick="showAppLog('${a.slug}')">≣</button>
     </div>`;
   }).join("");
+}
+
+async function scanApps() {
+  if ($("discover").style.display !== "none") { $("discover").style.display = "none"; return; }
+  $("scanBtn").textContent = "scanning…";
+  const r = await fetch("/api/apps/discover");
+  const cands = await r.json();
+  $("scanBtn").textContent = "⌕ Scan for projects";
+  if (!cands.length) {
+    $("discover").innerHTML = `<div class="empty">No launchable projects found (looked for git repos with dev.sh/run.sh or npm dev/start scripts).</div>`;
+    $("discover").style.display = "";
+    return;
+  }
+  $("discover").innerHTML = cands.map(c => {
+    const port = c.port ? ` <span class="muted" style="font-weight:400">· :${c.port}</span>` : "";
+    const state = c.already ? `<span class="pill off">already added</span>`
+      : c.blocked ? `<span class="pill bad">blocked</span>`
+      : `<span class="pill ok">ready</span>`;
+    const sub = c.blocked
+      ? `<span style="color:#f08b86">${c.command} · ${c.dir} — launchd can't read this folder (TCC); move it to your home root to launch</span>`
+      : `${c.command} · ${c.dir}`;
+    return `<div class="row" ${c.already ? 'style="opacity:.55"' : ''}>
+      <input type="checkbox" data-adopt="${c.slug}" ${c.already ? "disabled" : ""} ${!c.already && !c.blocked ? "checked" : ""}/>
+      <div class="meta">
+        <div class="lbl mono">${c.name}${port}</div>
+        <div class="sub">${sub}</div>
+      </div>
+      ${state}
+    </div>`;
+  }).join("") + `<div class="row" style="justify-content:flex-end;background:#11141a">
+      <span class="muted" style="flex:1;font-size:12px">commands are inferred server-side — hand-tune apps.json afterwards if a project needs env vars or a different port</span>
+      <button onclick="adoptApps()">＋ Add selected</button>
+    </div>`;
+  $("discover").style.display = "";
+}
+
+async function adoptApps() {
+  const slugs = [...document.querySelectorAll('#discover input[data-adopt]:checked')].map(el => el.dataset.adopt);
+  if (!slugs.length) { toast("nothing selected"); return; }
+  const r = await fetch("/api/apps/adopt", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ slugs }),
+  });
+  const j = await r.json();
+  toast(j.ok ? `added ${j.added.length} app(s)${j.skipped.length ? ` · ${j.skipped.length} skipped` : ""}` : `adopt failed: ${j.detail}`);
+  $("discover").style.display = "none";
+  loadApps();
 }
 
 async function appAct(slug, what) {

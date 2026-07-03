@@ -80,11 +80,24 @@ out of TCC-protected folders (see Quickstart) and adjust the paths.
 | GET | `/api/apps` | configured apps with live status (running/stopped/exited/failed/blocked) |
 | POST | `/api/apps/{slug}/{start,stop}` | launch as / remove a transient launchd agent (slugs only — commands never cross HTTP) |
 | GET | `/api/apps/{slug}/log?lines=200` | tail a launched app's log |
+| GET | `/api/apps/discover` | scan the roots for launchable git projects (server-side inference) |
+| POST | `/api/apps/adopt` | add scanned candidates to apps.json by slug (append-only; never rewrites your edits) |
 
 ## Launch your dev apps
 
-Copy `apps.json.example` to `apps.json` (gitignored — it holds machine-specific paths) and
-list your projects:
+The fast path: click **Scan for projects** in the Apps section. The server walks your home
+root and `~/Documents` (one level) for git repos and infers how to start each one —
+`dev.sh`/`run.sh`, an npm `dev`/`start` script, or a workspace's dev script
+(`npm run dev -w web`) — with the port read from the script text or the framework's
+default. Tick the ones you want, Add, done. Already-configured projects show as such;
+projects in TCC-protected folders appear as *blocked* with the move hint. Candidates are
+generated entirely server-side — the browser only posts back which slugs to adopt, so
+commands never cross HTTP. Inference is heuristic: hand-tune the written `apps.json`
+afterwards if a project needs env vars or a different port (your edits are never
+overwritten — adoption only appends).
+
+Or by hand: copy `apps.json.example` to `apps.json` (gitignored — it holds
+machine-specific paths) and list your projects:
 
 ```json
 [
