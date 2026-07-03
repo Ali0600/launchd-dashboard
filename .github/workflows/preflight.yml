@@ -1,0 +1,37 @@
+name: Preflight
+
+# Pre-flight dependency changes on every PR with the user's own tool
+# (github.com/Ali0600/preflight): CVEs, and — the incident this repo taught it —
+# runtime compatibility. Deps here must stay installable on Python 3.9 (run.sh
+# builds the venv with the system python3), so a floor bump past a package's
+# 3.9 support gets an INCOMPAT comment + failed check instead of merging green
+# on a 3.12 CI and breaking the dev machine.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write # SARIF upload to the Security tab
+
+concurrency:
+  group: preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Pre-flight dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - id: preflight
+        uses: Ali0600/preflight/packages/action@main
+        with:
+          python-version: '3.9'
+      - name: Upload findings to the Security tab
+        if: always() && hashFiles('preflight.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: preflight.sarif
