@@ -226,6 +226,18 @@ def list_ports(agent_pids: Optional[dict[int, str]] = None) -> list[dict]:
     return entries
 
 
+def ports_by_agent(entries: list[dict]) -> dict[str, list[int]]:
+    """From `list_ports` output: agent label -> sorted unique listening ports.
+    The live half of the declared-vs-live reconciliation (an app's Open button must
+    target a port its agent actually holds, not the port apps.json wishes it had)."""
+    out: dict = {}
+    for e in entries:
+        agent = e.get("agent")
+        if agent:
+            out.setdefault(agent, set()).add(e["port"])
+    return {label: sorted(ports) for label, ports in out.items()}
+
+
 def kill_listener(pid: int) -> dict:
     """SIGTERM a process — but only one that is currently holding a listening
     port (re-checked live), so the endpoint can't kill arbitrary pids."""

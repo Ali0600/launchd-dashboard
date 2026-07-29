@@ -179,7 +179,12 @@ def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_P
         return {"ok": False, "detail": "apps.json is not a JSON array — fix it by hand first"}
     taken_slugs = {str(e.get("slug")) for e in raw if isinstance(e, dict)}
     taken_dirs = {str(e.get("dir")) for e in raw if isinstance(e, dict)}
-    added, skipped = [], []
+    declared_ports = {
+        e.get("port"): str(e.get("slug"))
+        for e in raw
+        if isinstance(e, dict) and e.get("port") is not None
+    }
+    added, skipped, warnings = [], [], []
     for slug in slugs:
         c = by_slug.get(slug)
         if c is None:
@@ -190,7 +195,15 @@ def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_P
             continue
         entry = {"slug": c["slug"], "name": c["name"], "dir": tilde(c["dir"]), "command": c["command"]}
         if c.get("port"):
+            if c["port"] in declared_ports:
+                # Legal (two apps can share a port if never run together), but the #1 way
+                # a dev server silently lands on a different port — say it up front.
+                warnings.append(
+                    f"{slug}: port {c['port']} is also declared by {declared_ports[c['port']]} — "
+                    "consider a dedicated port"
+                )
             entry["port"] = c["port"]
+            declared_ports[c["port"]] = c["slug"]
         raw.append(entry)
         taken_slugs.add(c["slug"])
         added.append(slug)
@@ -199,7 +212,7 @@ def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_P
             config.write_text(json.dumps(raw, indent=2) + "\n")
         except OSError as exc:
             return {"ok": False, "detail": f"could not write apps.json: {exc}"}
-    return {"ok": True, "added": added, "skipped": skipped}
+    return {"ok": True, "added": added, "skipped": skipped, "warnings": warnings}
 
 
 def tilde(path: str) -> str:

@@ -80,10 +80,30 @@ def api_disable(label: str) -> dict:
 @app.get("/api/apps")
 def api_apps() -> JSONResponse:
     notes = annotations.load_annotations()
+    specs = apps.load_apps()
+    infos = [(spec, apps.describe(spec)) for spec in specs]
+
+    # Live half of the declared-vs-live port reconciliation: which ports each app's
+    # agent ACTUALLY holds. Declared ports drift (Next.js silently steps 3000→3001
+    # on a collision), and the Open button must follow reality, not apps.json.
+    agent_pids = {a["pid"]: a["label"] for a in launchd.list_agents(include_vendor=True) if a["pid"]}
+    for spec, info in infos:
+        if info["pid"]:
+            agent_pids[info["pid"]] = spec.label
+    by_agent = ports.ports_by_agent(ports.list_ports(agent_pids))
+    shared = apps.shared_ports(specs)
+
     out = []
-    for spec in apps.load_apps():
-        info = apps.describe(spec)
+    for spec, info in infos:
         info["annotation"] = notes.get(spec.label)
+        live = by_agent.get(spec.label, [])
+        open_port, mismatch = apps.port_status(info["port"], live, info["status"] == "running")
+        info["live_ports"] = live
+        info["open_port"] = open_port
+        info["port_mismatch"] = mismatch
+        info["port_shared_with"] = [
+            s for s in shared.get(info["port"], []) if s != spec.slug
+        ]
         out.append(info)
     return JSONResponse(out)
 
@@ -351,21 +371,29 @@ async function loadApps() {
       : `<span class="pill off">${a.status}</span>`;
     const port = a.port ? ` <span class="muted" style="font-weight:400">· :${a.port}</span>` : "";
     const note = a.annotation?.purpose ? ` · <span style="color:#aeb4c0">${a.annotation.purpose}</span>` : "";
+    const drift = a.port_mismatch
+      ? ` · <span style="color:#f0b86e">⚠ serving on :${a.open_port} — declared :${a.port} (another app may hold it)</span>`
+      : "";
+    const sharedNote = !a.port_mismatch && a.port_shared_with?.length
+      ? ` · <span class="muted">port also declared by ${a.port_shared_with.join(", ")}</span>`
+      : "";
     const sub = a.blocked
       ? `<span style="color:#f08b86">${a.dir} is TCC-protected — move it out of Documents/Desktop/Downloads to launch</span>`
-      : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}${note}`;
-    const open = a.status === "running" && a.port
-      ? `<button onclick="window.open('http://127.0.0.1:${a.port}','_blank')" title="Open in browser">↗</button>` : "";
+      : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}${note}${drift}${sharedNote}`;
+    const open = a.status === "running" && a.open_port
+      ? `<button onclick="window.open('http://127.0.0.1:${a.open_port}','_blank')" title="Open in browser">↗</button>` : "";
     const action = a.blocked ? ""
       : a.status === "running"
         ? `<button class="icon" title="Restart" onclick="appAct('${a.slug}','restart')">↻</button>
            <button class="icon" title="Stop" onclick="appAct('${a.slug}','stop')">■</button>`
         : `<button class="icon" title="Start" onclick="appAct('${a.slug}','start')">▶</button>`;
     const login = a.login ? ' <span class="muted" style="font-weight:400;font-size:11px">· at login</span>' : "";
+    const shownPort = a.port_mismatch ? a.open_port : a.port;
+    const portTag = shownPort ? ` <span class="muted" style="font-weight:400">· :${shownPort}</span>` : "";
     return `<div class="row">
       <span class="dot ${dot}"></span>
       <div class="meta">
-        <div class="lbl mono">${a.name}${login}${port}</div>
+        <div class="lbl mono">${a.name}${login}${portTag}</div>
         <div class="sub">${sub}</div>
       </div>
       ${pill}${open}${action}
@@ -417,7 +445,8 @@ async function adoptApps() {
     body: JSON.stringify({ slugs }),
   });
   const j = await r.json();
-  toast(j.ok ? `added ${j.added.length} app(s)${j.skipped.length ? ` · ${j.skipped.length} skipped` : ""}` : `adopt failed: ${j.detail}`);
+  const warn = j.warnings?.length ? ` · ⚠ ${j.warnings.join(" · ")}` : "";
+  toast(j.ok ? `added ${j.added.length} app(s)${j.skipped.length ? ` · ${j.skipped.length} skipped` : ""}${warn}` : `adopt failed: ${j.detail}`);
   $("discover").style.display = "none";
   loadApps();
 }

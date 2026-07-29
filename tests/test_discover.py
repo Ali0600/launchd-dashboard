@@ -94,6 +94,16 @@ def test_adopt_appends_without_touching_existing(tmp_path):
     assert saved[1]["port"] == 5173
 
 
+def test_adopt_warns_on_duplicate_declared_port(tmp_path):
+    cfg = tmp_path / "apps.json"
+    cfg.write_text(json.dumps([{"slug": "web", "dir": "~/web", "command": "npm run dev", "port": 3000}]))
+    cands = [{"slug": "landing", "name": "landing", "dir": "/l", "command": "npm run dev", "port": 3000}]
+    res = discover.adopt_apps(cands, ["landing"], config=cfg)
+    assert res["ok"] and res["added"] == ["landing"]  # still added — sharing is legal
+    assert len(res["warnings"]) == 1
+    assert "port 3000 is also declared by web" in res["warnings"][0]
+
+
 def test_adopt_refuses_malformed_config(tmp_path):
     cfg = tmp_path / "apps.json"
     cfg.write_text("{oops")
