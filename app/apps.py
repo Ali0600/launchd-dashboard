@@ -185,6 +185,29 @@ def shquote(s: str) -> str:
 # --------------------------------------------------------------------------- #
 # Status + control (subprocess wrappers)
 # --------------------------------------------------------------------------- #
+def port_status(
+    declared: Optional[int], live_ports: list, running: bool
+) -> "tuple[Optional[int], bool]":
+    """(open_port, mismatch) for an app row. The Open target prefers what the agent
+    ACTUALLY listens on — a dev server can silently land elsewhere (Next.js steps
+    3000→3001 when 3000 is taken), which made Open open a different app. Mismatch is
+    only claimed when we can see live ports and the declared one isn't among them."""
+    if running and live_ports:
+        open_port = declared if declared in live_ports else live_ports[0]
+        return open_port, declared is not None and declared not in live_ports
+    return declared, False
+
+
+def shared_ports(specs: "list[AppSpec]") -> dict:
+    """Declared port -> slugs declaring it (only ports declared more than once).
+    Surfaced so a collision is visible before anything is launched."""
+    by_port: dict = {}
+    for s in specs:
+        if s.port is not None:
+            by_port.setdefault(s.port, []).append(s.slug)
+    return {port: slugs for port, slugs in by_port.items() if len(slugs) > 1}
+
+
 def app_state(loaded: bool, pid: Optional[int], last_exit: Optional[int]) -> str:
     """running | stopped (not loaded) | exited (loaded, clean end) | failed."""
     if not loaded:

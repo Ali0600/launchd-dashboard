@@ -129,3 +129,17 @@ def test_agent_for_walks_ppid_chain():
 
 def test_agent_for_survives_ppid_cycle():
     assert ports.agent_for(5, {5: 6, 6: 5}, {}) is None
+
+
+def test_ports_by_agent_groups_and_dedupes():
+    entries = [
+        {"port": 8001, "agent": "com.launchddash.app.grocery-dev"},
+        {"port": 8001, "agent": "com.launchddash.app.grocery-dev"},  # uvicorn --reload twins
+        {"port": 8081, "agent": "com.launchddash.app.grocery-dev"},
+        {"port": 3001, "agent": "com.launchddash.app.preflight-landing"},
+        {"port": 5000, "agent": None},  # unattributed listener ignored
+    ]
+    assert ports.ports_by_agent(entries) == {
+        "com.launchddash.app.grocery-dev": [8001, 8081],
+        "com.launchddash.app.preflight-landing": [3001],
+    }

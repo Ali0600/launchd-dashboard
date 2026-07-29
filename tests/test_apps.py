@@ -147,6 +147,32 @@ def test_stop_keeps_plist_for_login_apps(monkeypatch, tmp_path):
     assert res["ok"] and not plist.exists()
 
 
+def test_port_status_the_open_button_invariant():
+    # THE bug: declared :3000, but the agent actually serves :3001 (Next.js silently
+    # steps past a taken port). Open must follow reality and the drift must be flagged.
+    assert apps.port_status(3000, [3001], True) == (3001, True)
+    # declared matches a live port → open it, no drift
+    assert apps.port_status(3000, [3000], True) == (3000, False)
+    # multi-port app (grocery-dev): declared among live → keep the declared choice
+    assert apps.port_status(8081, [8001, 8081], True) == (8081, False)
+    # no declared port → first live port, not a mismatch (nothing was promised)
+    assert apps.port_status(None, [3001], True) == (3001, False)
+    # running but scan saw nothing (race) → fall back to declared, claim nothing
+    assert apps.port_status(3000, [], True) == (3000, False)
+    # stopped → declared, never a mismatch
+    assert apps.port_status(3000, [3001], False) == (3000, False)
+
+
+def test_shared_ports_only_lists_duplicates():
+    specs = [
+        spec(slug="a", port=3000),
+        spec(slug="b", port=3000),
+        spec(slug="c", port=8081),
+        spec(slug="d", port=None),
+    ]
+    assert apps.shared_ports(specs) == {3000: ["a", "b"]}
+
+
 def test_restart_waits_for_unload_before_starting(monkeypatch):
     calls = []
     order = []
