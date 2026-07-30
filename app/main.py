@@ -407,8 +407,9 @@ async function loadApps() {
     return;
   }
   $("applist").innerHTML = apps.map(a => {
-    const dot = a.blocked ? "bad" : a.status === "running" ? "run" : a.status === "failed" ? "bad" : "off";
-    const pill = a.blocked ? `<span class="pill bad">blocked</span>`
+    const dot = a.blocked || a.missing ? "bad" : a.status === "running" ? "run" : a.status === "failed" ? "bad" : "off";
+    const pill = a.missing ? `<span class="pill bad">path missing</span>`
+      : a.blocked ? `<span class="pill bad">blocked</span>`
       : a.status === "running" ? `<span class="pill run">running</span>`
       : a.status === "failed" ? `<span class="pill bad">failed</span>`
       : `<span class="pill off">${a.status}</span>`;
@@ -420,7 +421,9 @@ async function loadApps() {
     const sharedNote = !a.port_mismatch && a.port_shared_with?.length
       ? ` · <span class="muted">port also declared by ${a.port_shared_with.join(", ")}</span>`
       : "";
-    const sub = a.blocked
+    const sub = a.missing
+      ? `<span style="color:#f08b86">${a.dir} no longer exists — moved? run a scan to repair the path</span>`
+      : a.blocked
       ? `<span style="color:#f08b86">${a.dir} is TCC-protected — move it out of Documents/Desktop/Downloads to launch</span>`
       : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}${note}${drift}${sharedNote}`;
     const open = a.status === "running" && a.open_port
@@ -461,14 +464,20 @@ async function scanApps() {
     const port = c.port ? ` <span class="muted" style="font-weight:400">· :${c.port}</span>` : "";
     const state = c.already ? `<span class="pill off">already added</span>`
       : !c.launchable ? `<span class="pill off">no launch found</span>`
+      : c.conflict ? `<span class="pill off">slug in use</span>`
+      : c.moved ? `<span class="pill run">moved</span>`
       : c.blocked ? `<span class="pill bad">blocked</span>`
       : `<span class="pill ok">ready</span>`;
     const sub = !c.launchable
       ? `<span class="muted">${c.dir} — ${c.reason}</span>`
+      : c.conflict
+      ? `<span class="muted">${c.dir} — ${c.reason}</span>`
+      : c.moved
+      ? `${c.command} · ${c.dir}<br><span style="color:#74b3ee">was ${c.previous_dir} — updates the existing app's path</span>`
       : c.blocked
       ? `<span style="color:#f08b86">${c.command} · ${c.dir} — launchd can't read this folder (TCC); move it to your home root to launch</span>`
       : `${c.command} · ${c.dir}`;
-    const inert = c.already || !c.launchable;
+    const inert = c.already || !c.launchable || c.conflict;
     return `<div class="row" ${inert ? 'style="opacity:.55"' : ''}>
       <input type="checkbox" data-adopt="${c.slug}" ${inert ? "disabled" : ""} ${!inert && !c.blocked ? "checked" : ""}/>
       <div class="meta">
@@ -494,7 +503,12 @@ async function adoptApps() {
   });
   const j = await r.json();
   const warn = j.warnings?.length ? ` · ⚠ ${j.warnings.join(" · ")}` : "";
-  toast(j.ok ? `added ${j.added.length} app(s)${j.skipped.length ? ` · ${j.skipped.length} skipped` : ""}${warn}` : `adopt failed: ${j.detail}`);
+  const parts = [
+    `added ${j.added?.length ?? 0}`,
+    j.updated?.length ? `updated ${j.updated.length}` : "",
+    j.skipped?.length ? `${j.skipped.length} skipped` : "",
+  ].filter(Boolean);
+  toast(j.ok ? `${parts.join(" · ")}${warn}` : `adopt failed: ${j.detail}`);
   $("discover").style.display = "none";
   loadApps();
 }

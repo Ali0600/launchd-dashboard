@@ -234,6 +234,7 @@ def discover_apps(
     roots = roots if roots is not None else scan_roots()
     existing = existing if existing is not None else load_apps()
     known_dirs = {spec.dir for spec in existing}
+    configured_by_slug = {spec.slug: spec for spec in existing}
     dashboard_root = str(CONFIG_PATH.parent)
     out: list[dict] = []
     # Keyed by filesystem identity, not path text: two roots can spell the same
@@ -253,16 +254,51 @@ def discover_apps(
             seen_dirs.add(ident)
             candidate["blocked"] = tcc_blocked(p)
             candidate["already"] = p in known_dirs
+            candidate.update(_relocation(candidate, p, configured_by_slug))
             out.append(candidate)
-    # Ready first, then blocked, then un-inferable, already-configured last;
-    # stable by name within groups.
-    out.sort(key=lambda c: (c["already"], not c["launchable"], c["blocked"], c["name"].lower()))
+    # Ready, moved, blocked, un-inferable, already-configured last; by name within groups.
+    out.sort(
+        key=lambda c: (
+            c["already"],
+            not c["launchable"],
+            c["blocked"],
+            not c["moved"],
+            c["name"].lower(),
+        )
+    )
     return out
 
 
+def _relocation(candidate: dict, path: str, configured: dict) -> dict:
+    """Did this project MOVE? Its slug is configured but points somewhere else.
+
+    Only a vanished old directory counts as a move (then adoption repairs the stale
+    path). If the old directory still exists there are two copies on disk and
+    repointing would silently retarget a working app — that's a conflict for the user
+    to resolve, not a guess for us to make."""
+    if candidate["already"]:
+        return {"moved": False, "conflict": False}
+    spec = configured.get(candidate["slug"])
+    if spec is None or spec.dir == path:
+        return {"moved": False, "conflict": False}
+    if Path(spec.dir).is_dir():
+        return {
+            "moved": False,
+            "conflict": True,
+            "reason": f"slug already used by {tilde(spec.dir)}, which still exists — "
+            "rename this project's folder or remove the other copy",
+        }
+    return {"moved": True, "conflict": False, "previous_dir": tilde(spec.dir)}
+
+
 def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_PATH) -> dict:
-    """Merge chosen candidates into apps.json. Appends only — existing entries
-    (including hand-edited fields) are never touched; duplicate slugs/dirs skip."""
+    """Merge chosen candidates into apps.json.
+
+    New projects are APPENDED; a MOVED project (same slug, old directory gone) has its
+    existing entry's `dir` repaired in place and nothing else — hand-tuned command/port/
+    env/login/name always survive. Anything the scan offers as adoptable must be
+    accepted here: the two used to disagree (dir-keyed vs slug-keyed), which made a
+    moved project read "Ready" and then skip as "already configured"."""
     by_slug = {c["slug"]: c for c in candidates}
     try:
         raw = json.loads(config.read_text()) if config.exists() else []
@@ -278,7 +314,7 @@ def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_P
         for e in raw
         if isinstance(e, dict) and e.get("port") is not None
     }
-    added, skipped, warnings = [], [], []
+    added, updated, skipped, warnings = [], [], [], []
     for slug in slugs:
         c = by_slug.get(slug)
         if c is None:
@@ -286,6 +322,17 @@ def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_P
             continue
         if not c.get("launchable", True):
             skipped.append(f"{slug} (no launch command could be inferred)")
+            continue
+        if c.get("conflict"):
+            skipped.append(f"{slug} ({c.get('reason', 'slug already configured elsewhere')})")
+            continue
+        if c.get("moved"):
+            entry = next((e for e in raw if isinstance(e, dict) and e.get("slug") == slug), None)
+            if entry is None:  # config changed under us since the scan
+                skipped.append(f"{slug} (no longer configured — re-scan)")
+                continue
+            entry["dir"] = tilde(c["dir"])  # repair the path, touch nothing else
+            updated.append(slug)
             continue
         if c["slug"] in taken_slugs or c["dir"] in taken_dirs or tilde(c["dir"]) in taken_dirs:
             skipped.append(f"{slug} (already configured)")
@@ -304,12 +351,18 @@ def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_P
         raw.append(entry)
         taken_slugs.add(c["slug"])
         added.append(slug)
-    if added:
+    if added or updated:
         try:
             config.write_text(json.dumps(raw, indent=2) + "\n")
         except OSError as exc:
             return {"ok": False, "detail": f"could not write apps.json: {exc}"}
-    return {"ok": True, "added": added, "skipped": skipped, "warnings": warnings}
+    return {
+        "ok": True,
+        "added": added,
+        "updated": updated,
+        "skipped": skipped,
+        "warnings": warnings,
+    }
 
 
 def tilde(path: str) -> str:

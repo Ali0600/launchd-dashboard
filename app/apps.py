@@ -246,6 +246,9 @@ def describe(spec: AppSpec) -> dict:
         "pid": state.get("pid"),
         "last_exit": state.get("last_exit"),
         "blocked": tcc_blocked(spec.dir),
+        # A configured dir that no longer exists (project moved/deleted) — surfaced so a
+        # stale entry reads as broken instead of merely stopped; start already refuses.
+        "missing": not Path(spec.dir).is_dir(),
         "login": spec.login,
         "log_path": str(spec.log_path),
     }
