@@ -41,6 +41,73 @@ def make_project(root, name, files):
     return p
 
 
+def test_infer_python_prefers_the_project_venv(tmp_path):
+    """The sound-isolator shape: FastAPI app.py that self-launches, a project .venv, and
+    a pile of task scripts that must NOT be mistaken for the launcher."""
+    p = tmp_path / "sound-isolator"
+    (p / ".venv" / "bin").mkdir(parents=True)
+    (p / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    (p / "app.py").write_text(
+        'if __name__ == "__main__":\n    import uvicorn\n'
+        '    uvicorn.run(app, host="127.0.0.1", port=8000)\n'
+    )
+    (p / "pyproject.toml").write_text("[project]\nname='sound-isolator'\n")
+    for noise in ("isolate.sh", "render_job.sh", "cleanup.sh"):
+        (p / noise).write_text("#!/bin/sh\necho pipeline\n")
+    assert discover.infer_python(p) == {"command": ".venv/bin/python app.py", "port": 8000}
+    c = discover.classify_project(p)
+    assert c["launchable"] is True
+    assert c["command"] == ".venv/bin/python app.py"  # not ./isolate.sh
+    assert c["port"] == 8000
+
+
+def test_infer_python_falls_back_to_uv_without_a_venv(tmp_path):
+    p = tmp_path / "svc"
+    p.mkdir()
+    (p / "main.py").write_text("import uvicorn\nuvicorn.run(app, port=9100)\n")
+    (p / "pyproject.toml").write_text("[project]\nname='svc'\n")
+    assert discover.infer_python(p) == {"command": "uv run python main.py", "port": 9100}
+
+
+def test_infer_python_needs_an_entry_point_and_an_environment(tmp_path):
+    bare = tmp_path / "lib"
+    bare.mkdir()
+    (bare / "pyproject.toml").write_text("[project]\nname='lib'\n")
+    assert discover.infer_python(bare) is None  # no app.py/main.py/server.py
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "app.py").write_text("print('hi')\n")
+    assert discover.infer_python(loose) is None  # no .venv and no pyproject
+
+
+def test_python_entry_without_a_port_is_still_launchable(tmp_path):
+    p = tmp_path / "worker"
+    (p / ".venv" / "bin").mkdir(parents=True)
+    (p / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    (p / "server.py").write_text("serve_forever()\n")
+    assert discover.infer_python(p) == {"command": ".venv/bin/python server.py", "port": None}
+
+
+def test_uninferable_project_is_listed_not_dropped(tmp_path, monkeypatch):
+    """Silently skipping reads as 'the scanner is broken' — the reason must be visible."""
+    make_project(tmp_path, "docs-only", {"README.md": "# just docs\n"})
+    monkeypatch.setattr(discover, "tcc_blocked", lambda d: False)
+    [c] = discover.discover_apps(roots=[tmp_path], existing=[])
+    assert c["slug"] == "docs-only"
+    assert c["launchable"] is False
+    assert c["command"] is None
+    assert "no dev.sh/run.sh" in c["reason"]
+
+
+def test_adopt_refuses_an_uninferable_project(tmp_path):
+    cfg = tmp_path / "apps.json"
+    cands = [{"slug": "docs-only", "name": "docs", "dir": "/d", "command": None, "launchable": False}]
+    res = discover.adopt_apps(cands, ["docs-only"], config=cfg)
+    assert res["added"] == []
+    assert "no launch command" in res["skipped"][0]
+    assert not cfg.exists()
+
+
 def test_classify_project_shell_script_beats_npm(tmp_path):
     p = make_project(tmp_path, "api", {
         "dev.sh": "#!/bin/sh\nuvicorn app.main:app --port 8001 & npx expo start --web\n",

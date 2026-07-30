@@ -452,13 +452,17 @@ async function scanApps() {
   $("discover").innerHTML = cands.map(c => {
     const port = c.port ? ` <span class="muted" style="font-weight:400">· :${c.port}</span>` : "";
     const state = c.already ? `<span class="pill off">already added</span>`
+      : !c.launchable ? `<span class="pill off">no launch found</span>`
       : c.blocked ? `<span class="pill bad">blocked</span>`
       : `<span class="pill ok">ready</span>`;
-    const sub = c.blocked
+    const sub = !c.launchable
+      ? `<span class="muted">${c.dir} — ${c.reason}</span>`
+      : c.blocked
       ? `<span style="color:#f08b86">${c.command} · ${c.dir} — launchd can't read this folder (TCC); move it to your home root to launch</span>`
       : `${c.command} · ${c.dir}`;
-    return `<div class="row" ${c.already ? 'style="opacity:.55"' : ''}>
-      <input type="checkbox" data-adopt="${c.slug}" ${c.already ? "disabled" : ""} ${!c.already && !c.blocked ? "checked" : ""}/>
+    const inert = c.already || !c.launchable;
+    return `<div class="row" ${inert ? 'style="opacity:.55"' : ''}>
+      <input type="checkbox" data-adopt="${c.slug}" ${inert ? "disabled" : ""} ${!inert && !c.blocked ? "checked" : ""}/>
       <div class="meta">
         <div class="lbl mono">${c.name}${port}</div>
         <div class="sub">${sub}</div>

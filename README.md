@@ -89,6 +89,10 @@ The fast path: click **Scan for projects** in the Apps section. The server walks
 roots that exist on your machine — the home root, `~/projects`, `~/Projects`, `~/dev`,
 `~/code`, `~/src`, `~/repos`, `~/workspace`, `~/Documents` (one level each; add more in
 `CANDIDATE_ROOTS`) — for git repos and infers how to start each one —
+`dev.sh`/`run.sh`, an npm `dev`/`start` script (or a workspace's), or a Python entry
+point (`app.py`/`main.py`/`server.py`) run by the project's own `.venv` (falling back to
+`uv run` when there's a `pyproject.toml` but no venv). A repo nothing can be inferred for
+is listed as **no launch found** with the reason rather than skipped silently —
 `dev.sh`/`run.sh`, an npm `dev`/`start` script, or a workspace's dev script
 (`npm run dev -w web`) — with the port read from the script text or the framework's
 default. Tick the ones you want, Add, done. Already-configured projects show as such;
