@@ -154,14 +154,22 @@ def api_ports(all: bool = False) -> JSONResponse:
     agent_pids = {a["pid"]: a["label"] for a in agents if a["pid"]}
     # Dashboard-launched apps are filtered out of list_agents (they live in the Apps
     # section), so add their pids here or their ports would lose attribution.
-    for spec in apps.load_apps():
+    specs = apps.load_apps()
+    for spec in specs:
         info = apps.describe(spec)
         if info["pid"]:
             agent_pids[info["pid"]] = spec.label
-    entries = ports.list_ports(agent_pids)
-    if not all:
-        entries = [e for e in entries if not e["system"]]
-    return JSONResponse(entries)
+    scanned = ports.list_ports(agent_pids)
+    # A port held by a hidden *system* listener is still taken, so the claimed set is
+    # derived from the whole scan — never from the display-filtered rows.
+    live = {e["port"] for e in scanned}
+    entries = scanned if all else [e for e in scanned if not e["system"]]
+    # Claimed rows: ports a configured app declares but nothing is serving. Without
+    # them a project's port disappears from this section the moment it stops, even
+    # though the dashboard knows whose port it is. Live rows keep their exact shape
+    # (no `kind`), so existing consumers are unaffected.
+    claimed = [{**c, "kind": "claimed"} for c in apps.claimed_ports(specs, live)]
+    return JSONResponse(entries + claimed)
 
 
 @app.post("/api/ports/{pid}/kill")
@@ -510,9 +518,24 @@ async function loadPorts() {
   const r = await fetch(`/api/ports?all=true`);
   portData = await r.json();
   armedKill = null;
-  const shown = $("showSystem").checked ? portData : portData.filter(p => !p.system);
+  const shown = $("showSystem").checked ? portData : portData.filter(p => p.kind === "claimed" || !p.system);
   if (!shown.length) { $("portlist").innerHTML = `<div class="empty">Nothing is listening.</div>`; checkPort(); return; }
   $("portlist").innerHTML = shown.map(p => {
+    // Claimed: a configured app declares this port but nothing is serving it, so the
+    // port stays visible (and startable) instead of vanishing when the app stops.
+    if (p.kind === "claimed") {
+      const who = p.claimed_by.join(", ");
+      const start = p.claimed_by.length === 1
+        ? `<button class="icon" title="Start ${who}" onclick="appAct('${p.claimed_by[0]}','start')">▶</button>` : "";
+      return `<div class="row" style="opacity:.55">
+        <span class="dot off"></span>
+        <div class="meta">
+          <div class="lbl mono">:${p.port}</div>
+          <div class="sub">declared by ${who} — not currently served</div>
+        </div>
+        <span class="pill off">claimed</span>${start}
+      </div>`;
+    }
     const where = p.project || p.cwd || "";
     const agent = p.agent ? ` <span class="pill run mono">${p.agent}</span>` : "";
     const exposed = p.localhost ? "" : ` <span class="pill bad" title="bound beyond loopback — reachable from the LAN">exposed</span>`;
@@ -548,8 +571,11 @@ function checkPort() {
   const v = $("portcheck").value.trim();
   const el = $("portverdict");
   if (!/^\\d+$/.test(v)) { el.textContent = ""; return; }
-  const hit = portData.find(p => p.port === Number(v));
+  const port = Number(v);
+  const hit = portData.find(p => p.port === port && p.kind !== "claimed");
+  const claim = portData.find(p => p.port === port && p.kind === "claimed");
   if (hit) { el.innerHTML = `<span class="pill bad">taken · ${hit.command}</span>`; }
+  else if (claim) { el.innerHTML = `<span class="pill off">free — declared by ${claim.claimed_by.join(", ")}</span>`; }
   else { el.innerHTML = `<span class="pill ok">free</span>`; }
 }
 

@@ -163,6 +163,40 @@ def test_port_status_the_open_button_invariant():
     assert apps.port_status(3000, [3001], False) == (3000, False)
 
 
+def test_claimed_ports_are_declared_but_unbound():
+    """A project's port used to vanish from the ports view the moment its process died
+    (a reboot killed sound-isolator and :8000 disappeared entirely, though apps.json
+    said whose it was)."""
+    specs = [
+        spec(slug="sound-isolator", port=8000),
+        spec(slug="grocery-dev", port=8081),   # live -> not claimed
+        spec(slug="tweet-extractor", port=None),  # no declared port -> skipped
+    ]
+    assert apps.claimed_ports(specs, live_ports={8081}) == [
+        {"port": 8000, "claimed_by": ["sound-isolator"]}
+    ]
+
+
+def test_claimed_ports_group_multiple_claimants_and_sort():
+    specs = [
+        spec(slug="preflight-web", port=3000),
+        spec(slug="ai-project-dashboard", port=3000),
+        spec(slug="waymark", port=5173),
+    ]
+    assert apps.claimed_ports(specs, live_ports=set()) == [
+        {"port": 3000, "claimed_by": ["preflight-web", "ai-project-dashboard"]},
+        {"port": 5173, "claimed_by": ["waymark"]},
+    ]
+    # one of them serving 3000 removes the whole claim — the live row tells the truth
+    assert apps.claimed_ports(specs, live_ports={3000}) == [
+        {"port": 5173, "claimed_by": ["waymark"]}
+    ]
+
+
+def test_claimed_ports_empty_without_configured_apps():
+    assert apps.claimed_ports([], live_ports={8000}) == []
+
+
 def test_shared_ports_only_lists_duplicates():
     specs = [
         spec(slug="a", port=3000),

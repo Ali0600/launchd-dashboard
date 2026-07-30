@@ -49,6 +49,25 @@ def test_both_list_renderers_reattach_the_panel():
         assert "reattachLog()" in head, f"missing reattachLog() after `{anchor}`"
 
 
+def test_claimed_port_rows_render_without_a_kill_button():
+    """A claimed port has no process behind it — offering ✕ would be a lie. It gets a
+    start affordance instead, and only when a single app claims it (else ambiguous)."""
+    js = script()
+    branch = js.split('if (p.kind === "claimed")', 1)
+    assert len(branch) == 2, "the ports renderer must special-case claimed rows"
+    claimed_block = branch[1].split("const where =", 1)[0]
+    assert "killPort" not in claimed_block
+    assert "claimed_by.length === 1" in claimed_block
+    assert "appAct(" in claimed_block
+
+
+def test_port_checker_reports_free_but_declared():
+    js = script()
+    checker = js.split("function checkPort", 1)[1]
+    assert 'p.kind !== "claimed"' in checker, "a claimed row must not read as taken"
+    assert "free — declared by" in checker
+
+
 def test_rows_carry_the_log_key_the_panel_is_placed_by():
     """placeLog() finds its row by data-log-key; both row templates must emit one,
     matching the keys openLogPanel is called with (label / app:<slug>)."""

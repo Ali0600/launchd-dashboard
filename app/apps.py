@@ -198,6 +198,23 @@ def port_status(
     return declared, False
 
 
+def claimed_ports(specs: "list[AppSpec]", live_ports: set) -> "list[dict]":
+    """Declared ports with NO live listener, grouped by port:
+    [{"port": 8000, "claimed_by": ["sound-isolator"]}], sorted.
+
+    The ports section is a live lsof snapshot, so a project's port used to vanish the
+    moment its process died (observed: a reboot killed a manually-started
+    sound-isolator and :8000 disappeared from view entirely). These rows keep a
+    configured app's port visible as *claimed* while unbound. A port with any live
+    listener is deliberately NOT claimed — the live row tells the truth there, and
+    declared-vs-live drift is the Apps section's job (port_mismatch)."""
+    by_port: dict = {}
+    for s in specs:
+        if s.port is not None and s.port not in live_ports:
+            by_port.setdefault(s.port, []).append(s.slug)
+    return [{"port": port, "claimed_by": slugs} for port, slugs in sorted(by_port.items())]
+
+
 def shared_ports(specs: "list[AppSpec]") -> dict:
     """Declared port -> slugs declaring it (only ports declared more than once).
     Surfaced so a collision is visible before anything is launched."""
