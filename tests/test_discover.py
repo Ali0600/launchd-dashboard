@@ -83,11 +83,43 @@ def test_scan_roots_keeps_existing_dirs_and_dedupes(tmp_path):
     roots = discover.scan_roots([
         tmp_path,
         tmp_path / "projects",
-        tmp_path / "projects",  # duplicate — also the ~/projects vs ~/Projects case on
-        tmp_path / "dev",       # case-insensitive macOS volumes
+        tmp_path / "projects",  # same path twice
+        tmp_path / "dev",
         tmp_path / "nope",      # missing -> skipped
     ])
     assert [p.name for p in roots] == [tmp_path.name, "projects", "dev"]
+
+
+def test_dir_identity_is_the_same_for_two_paths_to_one_directory(tmp_path):
+    """Filesystem identity, not path text: `resolve()` can't tell that two spellings are
+    one directory on a case-insensitive volume. This runs everywhere via a symlink."""
+    real = tmp_path / "projects"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    assert discover.dir_identity(real) == discover.dir_identity(alias)
+    assert discover.dir_identity(tmp_path) != discover.dir_identity(real)
+    assert discover.dir_identity(tmp_path / "missing") is None
+
+
+def test_scan_roots_dedupes_case_spellings_of_one_directory(tmp_path):
+    """The live bug: on a case-INsensitive volume (macOS default) ~/projects and
+    ~/Projects are ONE directory that `resolve()` reports as two, so every project in
+    it was listed twice. NOTE this only *bites* on a case-insensitive filesystem — on
+    case-sensitive CI the second spelling simply doesn't exist and is skipped, so the
+    macOS run is the one that proves it."""
+    (tmp_path / "projects").mkdir()
+    roots = discover.scan_roots([tmp_path / "projects", tmp_path / "Projects"])
+    assert len(roots) == 1
+
+
+def test_discover_lists_an_aliased_project_once(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    make_project(projects, "waymark", {"package.json": json.dumps({"scripts": {"dev": "vite"}})})
+    monkeypatch.setattr(discover, "tcc_blocked", lambda d: False)
+    out = discover.discover_apps(roots=[projects, tmp_path / "Projects"], existing=[])
+    assert [c["slug"] for c in out] == ["waymark"]
 
 
 def test_candidate_roots_include_a_dedicated_projects_dir():
