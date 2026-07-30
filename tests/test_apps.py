@@ -1,6 +1,7 @@
 """Pure-logic tests for the app launcher — config parsing, plist rendering, state
 mapping, TCC guard. No live launchctl (fixtures only), same policy as the rest."""
 
+import json
 import plistlib
 
 from app import apps
@@ -205,6 +206,72 @@ def test_shared_ports_only_lists_duplicates():
         spec(slug="d", port=None),
     ]
     assert apps.shared_ports(specs) == {3000: ["a", "b"]}
+
+
+def test_remove_app_always_deletes_the_plist_even_for_login_apps(monkeypatch, tmp_path):
+    """THE trap: stop_app KEEPS the plist for login:true apps so they return at next
+    login. A removed app must not — it would resurrect pointing at a directory the user
+    deleted."""
+    plist = tmp_path / "com.launchddash.app.web.plist"
+    calls = []
+    monkeypatch.setattr(apps, "_run", lambda cmd: (calls.append(cmd), type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})())[1])
+    monkeypatch.setattr(apps, "_plist_file", lambda s: plist)
+
+    plist.write_text("x")
+    res = apps.remove_app(spec(login=True))
+    assert res["ok"] and res["stopped"] is True
+    assert not plist.exists(), "a removed login app would come back at next login"
+    assert calls[0][:2] == ["launchctl", "bootout"]
+
+    # ...and a plain app, and one that wasn't running (bootout non-zero) still removes.
+    plist.write_text("x")
+    assert apps.remove_app(spec(login=False))["ok"] and not plist.exists()
+    monkeypatch.setattr(apps, "_run", lambda cmd: type("R", (), {"returncode": 3, "stderr": "not loaded", "stdout": ""})())
+    plist.write_text("x")
+    res = apps.remove_app(spec())
+    assert res["ok"] and res["stopped"] is False and not plist.exists()
+
+
+def test_remove_entry_drops_only_the_target(tmp_path):
+    cfg = tmp_path / "apps.json"
+    cfg.write_text(json.dumps([
+        {"slug": "keep", "dir": "~/keep", "command": "run", "env": {"CI": "1"}, "login": True, "note": "custom"},
+        {"slug": "gone", "dir": "~/gone", "command": "run", "port": 3020},
+    ]))
+    res = apps.remove_entry("gone", config=cfg)
+    assert res["ok"] and res["removed"] is True
+    saved = json.loads(cfg.read_text())
+    assert saved == [
+        {"slug": "keep", "dir": "~/keep", "command": "run", "env": {"CI": "1"}, "login": True, "note": "custom"}
+    ]  # untouched, unknown keys included
+
+
+def test_remove_entry_unknown_slug_and_bad_config_leave_the_file_alone(tmp_path):
+    cfg = tmp_path / "apps.json"
+    original = json.dumps([{"slug": "keep", "dir": "~/keep", "command": "run"}])
+    cfg.write_text(original)
+    res = apps.remove_entry("nope", config=cfg)
+    assert res["ok"] and res["removed"] is False
+    assert cfg.read_text() == original
+
+    cfg.write_text("{oops")
+    res = apps.remove_entry("keep", config=cfg)
+    assert res["ok"] is False and "fix it by hand" in res["detail"]
+    assert cfg.read_text() == "{oops"
+
+    assert apps.remove_entry("keep", config=tmp_path / "missing.json") == {
+        "ok": True, "removed": False, "detail": "no apps.json"
+    }
+
+
+def test_removing_an_app_frees_its_claimed_port():
+    """The user-visible point of removal: a deleted project's port must stop being
+    claimed. Claims are derived from the configured specs, so dropping the entry is
+    what frees it."""
+    before = [spec(slug="jrpg", port=3020), spec(slug="web", port=3000)]
+    assert 3020 in {c["port"] for c in apps.claimed_ports(before, live_ports=set())}
+    after = [s for s in before if s.slug != "jrpg"]
+    assert 3020 not in {c["port"] for c in apps.claimed_ports(after, live_ports=set())}
 
 
 def test_restart_waits_for_unload_before_starting(monkeypatch):
