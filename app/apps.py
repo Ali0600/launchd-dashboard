@@ -312,6 +312,53 @@ def stop_app(spec: AppSpec) -> dict:
     return {"ok": True, "detail": f"stopped {spec.label}{suffix}"}
 
 
+def remove_app(spec: AppSpec) -> dict:
+    """Un-manage an app: stop it and delete its generated plist.
+
+    Deliberately NOT `stop_app`: that keeps the plist for `login: true` apps so they
+    come back at next login — which for a REMOVED app would resurrect a job pointing at
+    a directory the user just deleted. Removal always takes the plist with it.
+
+    Only the dashboard's own artifacts go: the project directory and the app's log are
+    never touched (this unmanages an app, it doesn't delete anyone's work)."""
+    res = _run(["launchctl", "bootout", f"gui/{os.getuid()}/{spec.label}"])
+    invalidate_state(spec.label)
+    try:
+        _plist_file(spec).unlink(missing_ok=True)
+    except OSError as exc:
+        warn(f"could not remove {spec.label} plist: {exc}")
+        return {"ok": False, "detail": f"could not remove the agent plist: {exc}"}
+    stopped = res.returncode == 0
+    return {
+        "ok": True,
+        "stopped": stopped,
+        "detail": f"removed {spec.label}" + ("" if stopped else " (was not running)"),
+    }
+
+
+def remove_entry(slug: str, config: Path = CONFIG_PATH) -> dict:
+    """Drop one app from apps.json, leaving every other entry exactly as parsed
+    (hand-tuned env/login/command and any unknown keys survive). An unreadable or
+    non-list config refuses rather than overwrites — same policy as adopt_apps."""
+    if not config.exists():
+        return {"ok": True, "removed": False, "detail": "no apps.json"}
+    try:
+        raw = json.loads(config.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        warn(f"apps.json unreadable, refusing to overwrite: {exc}")
+        return {"ok": False, "detail": f"apps.json unreadable ({exc}) — fix it by hand first"}
+    if not isinstance(raw, list):
+        return {"ok": False, "detail": "apps.json is not a JSON array — fix it by hand first"}
+    kept = [e for e in raw if not (isinstance(e, dict) and e.get("slug") == slug)]
+    if len(kept) == len(raw):
+        return {"ok": True, "removed": False, "detail": f"{slug} was not in apps.json"}
+    try:
+        config.write_text(json.dumps(kept, indent=2) + "\n")
+    except OSError as exc:
+        return {"ok": False, "detail": f"could not write apps.json: {exc}"}
+    return {"ok": True, "removed": True, "detail": f"removed {slug} from apps.json"}
+
+
 def restart_app(spec: AppSpec) -> dict:
     """Bootout (ignore result — it may simply not be running) then a fresh start,
     which rewrites the plist, so config edits are picked up on restart.

@@ -68,6 +68,18 @@ def test_port_checker_reports_free_but_declared():
     assert "free — declared by" in checker
 
 
+def test_remove_arms_before_it_deletes():
+    """Removal is destructive (stops the app, drops its config), so the first click must
+    only arm the button — same two-tap contract as the port kill control."""
+    js = script()
+    fn = js.split("async function removeApp", 1)[1].split("\n}", 1)[0]
+    assert "armedRemove !== slug" in fn, "first click must arm, not delete"
+    arm_block = fn.split("armedRemove !== slug", 1)[1].split("return;", 1)[0]
+    assert 'method: "DELETE"' not in arm_block, "the arming branch must not call the API"
+    assert 'method: "DELETE"' in fn, "the confirmed branch must call DELETE"
+    assert "loadPorts()" in fn, "a freed port must refresh the ports section"
+
+
 def test_rows_carry_the_log_key_the_panel_is_placed_by():
     """placeLog() finds its row by data-log-key; both row templates must emit one,
     matching the keys openLogPanel is called with (label / app:<slug>)."""

@@ -123,6 +123,27 @@ def api_app_restart(slug: str) -> dict:
     return apps.restart_app(_app_or_404(slug))
 
 
+@app.delete("/api/apps/{slug}")
+def api_app_remove(slug: str) -> dict:
+    """Un-manage an app: stop it, delete its plist, drop its apps.json entry. Its
+    claimed port disappears with it (claims are derived from the config). The project
+    directory and the app's log are never touched."""
+    spec = _app_or_404(slug)
+    stopped = apps.remove_app(spec)
+    if not stopped["ok"]:
+        return stopped
+    dropped = apps.remove_entry(slug)
+    if not dropped["ok"]:
+        return dropped
+    return {
+        "ok": True,
+        "stopped": stopped["stopped"],
+        "removed": dropped["removed"],
+        "detail": f"removed {slug}",
+        "log_path": str(spec.log_path),
+    }
+
+
 @app.get("/api/apps/discover")
 def api_apps_discover() -> JSONResponse:
     _discovered.clear()
@@ -422,13 +443,14 @@ async function loadApps() {
       ? ` · <span class="muted">port also declared by ${a.port_shared_with.join(", ")}</span>`
       : "";
     const sub = a.missing
-      ? `<span style="color:#f08b86">${a.dir} no longer exists — moved? run a scan to repair the path</span>`
+      ? `<span style="color:#f08b86">${a.dir} no longer exists — re-scan to repair the path, or ✕ to remove</span>`
       : a.blocked
       ? `<span style="color:#f08b86">${a.dir} is TCC-protected — move it out of Documents/Desktop/Downloads to launch</span>`
       : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}${note}${drift}${sharedNote}`;
     const open = a.status === "running" && a.open_port
       ? `<button onclick="window.open('http://127.0.0.1:${a.open_port}','_blank')" title="Open in browser">↗</button>` : "";
-    const action = a.blocked ? ""
+    // A missing dir can only fail to start — offer Logs + Remove and nothing else.
+    const action = a.blocked || a.missing ? ""
       : a.status === "running"
         ? `<button class="icon" title="Restart" onclick="appAct('${a.slug}','restart')">↻</button>
            <button class="icon" title="Stop" onclick="appAct('${a.slug}','stop')">■</button>`
@@ -444,9 +466,28 @@ async function loadApps() {
       </div>
       ${pill}${open}${action}
       <button class="icon" title="Logs" onclick="showAppLog('${a.slug}')">≣</button>
+      <button class="icon" id="rm-${a.slug}" title="Remove from the dashboard (stops it; your project files are untouched)" onclick="removeApp('${a.slug}')">✕</button>
     </div>`;
   }).join("");
   reattachLog();
+}
+
+let armedRemove = null; // slug armed for the two-tap confirm (destructive)
+
+async function removeApp(slug) {
+  if (armedRemove !== slug) {
+    armedRemove = slug;
+    const b = $(`rm-${slug}`);
+    b.textContent = "sure?"; b.style.width = "auto"; b.style.padding = "6px 8px"; b.style.color = "#f08b86";
+    setTimeout(() => { if (armedRemove === slug) { armedRemove = null; loadApps(); } }, 3000);
+    return;
+  }
+  armedRemove = null;
+  const r = await fetch(`/api/apps/${encodeURIComponent(slug)}`, { method: "DELETE" });
+  const j = await r.json();
+  toast(j.ok ? `removed ${slug}${j.stopped ? " (stopped it first)" : ""} — log kept at ${j.log_path}` : `remove failed: ${j.detail}`);
+  loadApps();
+  loadPorts();
 }
 
 async function scanApps() {
