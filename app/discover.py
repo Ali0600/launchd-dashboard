@@ -1,8 +1,9 @@
 """Discover launchable projects for the Apps section — the onboarding path.
 
-Scans the configured roots (home root + ~/Documents, one level deep) for git
-repos and infers how to start each one: a dev.sh/run.sh, or an npm `dev`/`start`
-script (including one level into npm workspaces, e.g. `npm run dev -w web`).
+Scans the project roots that exist on this machine (home root, ~/projects, ~/dev,
+~/Documents, … — see CANDIDATE_ROOTS) one level deep for git repos, and infers how
+to start each one: a dev.sh/run.sh, or an npm `dev`/`start` script (including one
+level into npm workspaces, e.g. `npm run dev -w web`).
 Ports come from the script text (`--port 5173`) or the framework's default.
 
 Candidates are generated entirely server-side; the browser only posts back WHICH
@@ -20,7 +21,37 @@ from typing import Optional
 
 from .apps import CONFIG_PATH, AppSpec, load_apps, tcc_blocked, warn
 
-DEFAULT_ROOTS = [Path.home(), Path.home() / "Documents"]
+# Where projects live. The home root plus the folders people actually keep code in —
+# a dedicated projects dir is the common convention, so scanning only ~ and ~/Documents
+# missed a whole tree. Non-existent roots are skipped, so this list is safe to keep
+# broad; scan_roots() is what callers use.
+CANDIDATE_ROOTS = [
+    Path.home(),
+    Path.home() / "projects",
+    Path.home() / "Projects",
+    Path.home() / "dev",
+    Path.home() / "code",
+    Path.home() / "src",
+    Path.home() / "repos",
+    Path.home() / "workspace",
+    Path.home() / "Documents",
+]
+
+
+def scan_roots(candidates: Optional[list[Path]] = None) -> list[Path]:
+    """The candidate roots that exist on this machine, de-duplicated (macOS paths are
+    case-insensitive, so ~/projects and ~/Projects can resolve to the same dir)."""
+    seen: set = set()
+    out: list[Path] = []
+    for root in candidates if candidates is not None else CANDIDATE_ROOTS:
+        if not root.is_dir():
+            continue
+        key = root.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return out
 
 # Framework dev-server defaults, keyed by the dependency that implies them.
 FRAMEWORK_PORTS = [
@@ -139,7 +170,7 @@ def discover_apps(
 ) -> list[dict]:
     """Scan roots (one level) for launchable git projects. Includes already-configured
     and TCC-blocked projects, marked, so the UI can show the full picture."""
-    roots = roots if roots is not None else DEFAULT_ROOTS
+    roots = roots if roots is not None else scan_roots()
     existing = existing if existing is not None else load_apps()
     known_dirs = {spec.dir for spec in existing}
     dashboard_root = str(CONFIG_PATH.parent)

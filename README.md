@@ -85,8 +85,10 @@ out of TCC-protected folders (see Quickstart) and adjust the paths.
 
 ## Launch your dev apps
 
-The fast path: click **Scan for projects** in the Apps section. The server walks your home
-root and `~/Documents` (one level) for git repos and infers how to start each one —
+The fast path: click **Scan for projects** in the Apps section. The server walks the project
+roots that exist on your machine — the home root, `~/projects`, `~/Projects`, `~/dev`,
+`~/code`, `~/src`, `~/repos`, `~/workspace`, `~/Documents` (one level each; add more in
+`CANDIDATE_ROOTS`) — for git repos and infers how to start each one —
 `dev.sh`/`run.sh`, an npm `dev`/`start` script, or a workspace's dev script
 (`npm run dev -w web`) — with the port read from the script text or the framework's
 default. Tick the ones you want, Add, done. Already-configured projects show as such;

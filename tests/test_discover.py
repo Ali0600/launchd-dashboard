@@ -77,6 +77,40 @@ def test_discover_skips_the_dashboard_itself(tmp_path, monkeypatch):
     assert discover.discover_apps(roots=[tmp_path], existing=[]) == []
 
 
+def test_scan_roots_keeps_existing_dirs_and_dedupes(tmp_path):
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "dev").mkdir()
+    roots = discover.scan_roots([
+        tmp_path,
+        tmp_path / "projects",
+        tmp_path / "projects",  # duplicate — also the ~/projects vs ~/Projects case on
+        tmp_path / "dev",       # case-insensitive macOS volumes
+        tmp_path / "nope",      # missing -> skipped
+    ])
+    assert [p.name for p in roots] == [tmp_path.name, "projects", "dev"]
+
+
+def test_candidate_roots_include_a_dedicated_projects_dir():
+    """A ~/projects folder is the common convention — scanning only ~ and ~/Documents
+    missed a whole tree of the user's work."""
+    names = [p.name for p in discover.CANDIDATE_ROOTS]
+    for expected in ("projects", "dev", "code", "Documents"):
+        assert expected in names
+
+
+def test_discover_scans_multiple_roots(tmp_path, monkeypatch):
+    """A project in a dedicated projects dir is found just like one at the home root."""
+    home, projects = tmp_path / "home", tmp_path / "home" / "projects"
+    home.mkdir()
+    projects.mkdir()
+    make_project(home, "at-home", {"run.sh": "serve --port 9000\n"})
+    make_project(projects, "in-projects", {"package.json": json.dumps({"scripts": {"dev": "vite"}})})
+    monkeypatch.setattr(discover, "tcc_blocked", lambda d: False)
+    out = discover.discover_apps(roots=[home, projects], existing=[])
+    assert {c["slug"] for c in out} == {"at-home", "in-projects"}
+    assert next(c for c in out if c["slug"] == "in-projects")["dir"].endswith("/projects/in-projects")
+
+
 def test_adopt_appends_without_touching_existing(tmp_path):
     cfg = tmp_path / "apps.json"
     cfg.write_text(json.dumps([{"slug": "old", "dir": "~/old", "command": "run", "env": {"CI": "1"}}]))
