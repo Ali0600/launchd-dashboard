@@ -2,9 +2,11 @@
 
 Scans the project roots that exist on this machine (home root, ~/projects, ~/dev,
 ~/Documents, … — see CANDIDATE_ROOTS) one level deep for git repos, and infers how
-to start each one: a dev.sh/run.sh, or an npm `dev`/`start` script (including one
-level into npm workspaces, e.g. `npm run dev -w web`).
-Ports come from the script text (`--port 5173`) or the framework's default.
+to start each one: a dev.sh/run.sh, an npm `dev`/`start` script (including one level
+into npm workspaces, e.g. `npm run dev -w web`), or a Python entry point run by the
+project's own virtualenv. Ports come from the script/source text (`--port 5173`,
+`port=8000`) or the framework's default. A project nothing can be inferred for is
+still listed, with the reason — a silent skip reads as a broken scanner.
 
 Candidates are generated entirely server-side; the browser only posts back WHICH
 slugs to adopt — commands never cross HTTP, same trust boundary as the launcher.
@@ -121,6 +123,42 @@ def infer_npm(pj: dict, workspaces: list[tuple[str, dict]]) -> Optional[dict]:
     return None
 
 
+# Root-level entry points a Python web app conventionally uses, best first.
+PYTHON_ENTRIES = ("app.py", "main.py", "server.py")
+
+# `port=8000` / `port = 8000` in source (uvicorn.run(..., port=8000)), as well as the
+# --port form the shell/npm inference already handles.
+_PY_PORT_RE = re.compile(r"\bport\s*=\s*(\d{2,5})")
+
+
+def infer_python(project: Path) -> Optional[dict]:
+    """Infer a launch for a Python project: a root entry point run by the project's own
+    virtualenv, else `uv run` when there's a pyproject.toml.
+
+    The venv interpreter is preferred because it's hermetic — a launchd agent gets a
+    minimal PATH and no shell profile, so `python` alone is a coin flip, while
+    `.venv/bin/python` is exact.
+    """
+    entry = next((e for e in PYTHON_ENTRIES if (project / e).is_file()), None)
+    if not entry:
+        return None
+    try:
+        source = (project / entry).read_text(errors="replace")
+    except OSError:
+        source = ""
+    # Only claim a port when the entry point actually names one.
+    port = port_from_text(source)
+    if port is None:
+        m = _PY_PORT_RE.search(source)
+        port = int(m.group(1)) if m else None
+
+    if (project / ".venv" / "bin" / "python").is_file():
+        return {"command": f".venv/bin/python {entry}", "port": port}
+    if (project / "pyproject.toml").is_file():
+        return {"command": f"uv run python {entry}", "port": port}
+    return None
+
+
 def _read_json(path: Path) -> Optional[dict]:
     try:
         data = json.loads(path.read_text())
@@ -145,35 +183,46 @@ def _workspace_packages(project: Path, pj: dict) -> list[tuple[str, dict]]:
     return out
 
 
-def classify_project(project: Path) -> Optional[dict]:
-    """One directory -> a candidate {slug,name,dir,command,port} or None."""
-    dev_sh = project / "dev.sh"
-    run_sh = project / "run.sh"
-    for script in (dev_sh, run_sh):
+def classify_project(project: Path) -> dict:
+    """One directory -> a candidate. `launchable` is False when nothing could be
+    inferred: the project is still listed (greyed out, with a reason) rather than
+    silently dropped — an invisible skip reads as "the scanner is broken"."""
+    base = {"slug": slugify(project.name), "name": project.name, "dir": str(project)}
+
+    # Only these two script names, deliberately: a repo full of task scripts
+    # (isolate.sh, render_job.sh, cleanup.sh …) must not be launched by accident.
+    for script in (project / "dev.sh", project / "run.sh"):
         if script.is_file():
             try:
                 port = port_from_text(script.read_text())
             except OSError:
                 port = None
-            return {
-                "slug": slugify(project.name),
-                "name": project.name,
-                "dir": str(project),
-                "command": f"./{script.name}",
-                "port": port,
-            }
+            return {**base, "command": f"./{script.name}", "port": port, "launchable": True}
+
     pj = _read_json(project / "package.json")
     if pj:
         launch = infer_npm(pj, _workspace_packages(project, pj))
         if launch:
             return {
-                "slug": slugify(project.name),
+                **base,
                 "name": str(pj.get("name") or project.name),
-                "dir": str(project),
                 "command": launch["command"],
                 "port": launch["port"],
+                "launchable": True,
             }
-    return None
+
+    launch = infer_python(project)
+    if launch:
+        return {**base, "command": launch["command"], "port": launch["port"], "launchable": True}
+
+    return {
+        **base,
+        "command": None,
+        "port": None,
+        "launchable": False,
+        "reason": "no dev.sh/run.sh, no npm dev/start script, no Python entry point "
+        "(app.py/main.py/server.py) — add one to apps.json by hand if it can be served",
+    }
 
 
 def discover_apps(
@@ -201,14 +250,13 @@ def discover_apps(
             if not project.is_dir() or not (project / ".git").exists():
                 continue
             candidate = classify_project(project)
-            if not candidate:
-                continue
             seen_dirs.add(ident)
             candidate["blocked"] = tcc_blocked(p)
             candidate["already"] = p in known_dirs
             out.append(candidate)
-    # Ready first, then blocked, already-configured last; stable by name within groups.
-    out.sort(key=lambda c: (c["already"], c["blocked"], c["name"].lower()))
+    # Ready first, then blocked, then un-inferable, already-configured last;
+    # stable by name within groups.
+    out.sort(key=lambda c: (c["already"], not c["launchable"], c["blocked"], c["name"].lower()))
     return out
 
 
@@ -235,6 +283,9 @@ def adopt_apps(candidates: list[dict], slugs: list[str], config: Path = CONFIG_P
         c = by_slug.get(slug)
         if c is None:
             skipped.append(f"{slug} (not in the last scan)")
+            continue
+        if not c.get("launchable", True):
+            skipped.append(f"{slug} (no launch command could be inferred)")
             continue
         if c["slug"] in taken_slugs or c["dir"] in taken_dirs or tilde(c["dir"]) in taken_dirs:
             skipped.append(f"{slug} (already configured)")
