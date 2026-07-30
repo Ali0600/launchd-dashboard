@@ -1,6 +1,7 @@
 """Pure-logic + tmp-dir tests for project discovery. No live scanning of the real home."""
 
 import json
+from pathlib import Path
 
 from app import discover
 from app.apps import AppSpec
@@ -225,6 +226,102 @@ def test_adopt_appends_without_touching_existing(tmp_path):
     assert saved[0] == {"slug": "old", "dir": "~/old", "command": "run", "env": {"CI": "1"}}  # untouched
     assert saved[1]["slug"] == "fresh"
     assert saved[1]["port"] == 5173
+
+
+def _moved_setup(tmp_path, keep_old=False):
+    """A project configured at <old> that now lives at <new>."""
+    old, new = tmp_path / "Documents" / "proj", tmp_path / "projects" / "proj"
+    (tmp_path / "Documents").mkdir()
+    (tmp_path / "projects").mkdir()
+    make_project(tmp_path / "projects", "proj", {"package.json": json.dumps({"scripts": {"dev": "vite"}})})
+    if keep_old:
+        make_project(tmp_path / "Documents", "proj", {"package.json": json.dumps({"scripts": {"dev": "vite"}})})
+    spec = AppSpec(slug="proj", name="proj", dir=str(old), command="npm run dev", port=3000)
+    return old, new, spec
+
+
+def test_moved_project_is_flagged_with_its_previous_dir(tmp_path, monkeypatch):
+    """The reported bug: a moved project read 'Ready' (dir-keyed) but adopt skipped it
+    as 'already configured' (slug-keyed)."""
+    old, new, spec = _moved_setup(tmp_path)
+    monkeypatch.setattr(discover, "tcc_blocked", lambda d: False)
+    [c] = discover.discover_apps(roots=[tmp_path / "projects"], existing=[spec])
+    assert c["moved"] is True
+    assert c["conflict"] is False
+    assert c["already"] is False
+    assert c["previous_dir"].endswith("Documents/proj")
+
+
+def test_two_copies_on_disk_is_a_conflict_not_a_move(tmp_path, monkeypatch):
+    """Repointing while the old dir still exists would silently retarget a working app."""
+    old, new, spec = _moved_setup(tmp_path, keep_old=True)
+    monkeypatch.setattr(discover, "tcc_blocked", lambda d: False)
+    [c] = discover.discover_apps(roots=[tmp_path / "projects"], existing=[spec])
+    assert c["moved"] is False
+    assert c["conflict"] is True
+    assert "still exists" in c["reason"]
+
+
+def test_same_dir_is_already_not_moved(tmp_path, monkeypatch):
+    make_project(tmp_path, "proj", {"package.json": json.dumps({"scripts": {"dev": "vite"}})})
+    spec = AppSpec(slug="proj", name="proj", dir=str(tmp_path / "proj"), command="npm run dev")
+    monkeypatch.setattr(discover, "tcc_blocked", lambda d: False)
+    [c] = discover.discover_apps(roots=[tmp_path], existing=[spec])
+    assert c["already"] is True and c["moved"] is False and c["conflict"] is False
+
+
+def test_adopt_repairs_a_moved_path_preserving_hand_edits(tmp_path):
+    cfg = tmp_path / "apps.json"
+    cfg.write_text(json.dumps([
+        {"slug": "proj", "name": "My Project", "dir": "~/Documents/proj",
+         "command": "npm run dev -- -p 3020", "port": 3020, "env": {"CI": "1"}, "login": True},
+        {"slug": "other", "dir": "~/other", "command": "run"},
+    ]))
+    cand = {"slug": "proj", "name": "proj", "dir": str(Path.home() / "projects" / "proj"),
+            "command": "npm run dev", "port": 3000, "launchable": True, "moved": True,
+            "conflict": False, "previous_dir": "~/Documents/proj"}
+    res = discover.adopt_apps([cand], ["proj"], config=cfg)
+    assert res["updated"] == ["proj"] and res["added"] == []
+    saved = json.loads(cfg.read_text())
+    assert len(saved) == 2  # repaired in place, not appended
+    entry = saved[0]
+    assert entry["dir"] == "~/projects/proj"          # path repaired
+    assert entry["name"] == "My Project"              # hand edits survive
+    assert entry["command"] == "npm run dev -- -p 3020"
+    assert entry["port"] == 3020
+    assert entry["env"] == {"CI": "1"} and entry["login"] is True
+    assert saved[1] == {"slug": "other", "dir": "~/other", "command": "run"}
+
+
+def test_adopt_refuses_a_conflicting_slug(tmp_path):
+    cfg = tmp_path / "apps.json"
+    original = json.dumps([{"slug": "proj", "dir": "~/Documents/proj", "command": "run"}])
+    cfg.write_text(original)
+    cand = {"slug": "proj", "name": "proj", "dir": "/x/proj", "command": "npm run dev",
+            "launchable": True, "moved": False, "conflict": True, "reason": "slug already used by ~/Documents/proj, which still exists"}
+    res = discover.adopt_apps([cand], ["proj"], config=cfg)
+    assert res["added"] == [] and res["updated"] == []
+    assert "still exists" in res["skipped"][0]
+    assert cfg.read_text() == original
+
+
+def test_everything_the_ui_offers_is_adoptable(tmp_path, monkeypatch):
+    """THE invariant this bug violated: discover and adopt must agree. Any candidate the
+    UI renders with an enabled checkbox must not come back 'already configured'."""
+    old, new, spec = _moved_setup(tmp_path)
+    make_project(tmp_path / "projects", "fresh", {"run.sh": "serve --port 9000\n"})
+    make_project(tmp_path / "projects", "docs-only", {"README.md": "# docs\n"})
+    monkeypatch.setattr(discover, "tcc_blocked", lambda d: False)
+    cands = discover.discover_apps(roots=[tmp_path / "projects"], existing=[spec])
+    offered = [c["slug"] for c in cands
+               if c["launchable"] and not c["already"] and not c.get("conflict")]
+    assert set(offered) == {"proj", "fresh"}
+
+    cfg = tmp_path / "apps.json"
+    cfg.write_text(json.dumps([{"slug": "proj", "dir": str(old), "command": "npm run dev"}]))
+    res = discover.adopt_apps(cands, offered, config=cfg)
+    assert res["skipped"] == [], f"the UI offered something adopt refused: {res['skipped']}"
+    assert set(res["added"] + res["updated"]) == set(offered)
 
 
 def test_adopt_warns_on_duplicate_declared_port(tmp_path):
