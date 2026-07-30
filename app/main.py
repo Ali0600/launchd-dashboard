@@ -208,7 +208,9 @@ PAGE = """<!DOCTYPE html>
   button:hover { background: #242935; } button:active { transform: scale(.97); }
   button.icon { width: 34px; padding: 6px 0; }
   .section { margin: 22px 0 8px; font-size: 12px; color: #8b909c; text-transform: uppercase; letter-spacing: .04em; }
-  .logwrap { margin-top: 10px; background: #0c0e12; border: 0.5px solid #272b34; border-radius: 10px;
+  /* The panel is MOVED under whichever row was clicked (see openLogPanel), so it needs
+     to sit inset when it lands between rows inside a .list. */
+  .logwrap { margin: 8px 12px; background: #0c0e12; border: 0.5px solid #272b34; border-radius: 10px;
              display: none; }
   .logwrap.open { display: block; }
   .loghead { display: flex; justify-content: space-between; padding: 9px 14px; border-bottom: 0.5px solid #272b34;
@@ -297,7 +299,7 @@ async function load() {
     const next = a.next_run ? ` · next ${rel(a.next_run)}` : "";
     const note = a.annotation?.purpose ? ` · <span style="color:#aeb4c0">${a.annotation.purpose}</span>` : "";
     const hover = a.annotation ? [a.annotation.note, a.annotation.repo].filter(Boolean).join(" — ") : "";
-    return `<div class="row" ${hover ? `title="${hover.replace(/"/g, '&quot;')}"` : ""}>
+    return `<div class="row" data-log-key="${a.label}" ${hover ? `title="${hover.replace(/"/g, '&quot;')}"` : ""}>
       <span class="dot ${dot}"></span>
       <div class="meta">
         <div class="lbl mono">${a.label}${a.vendor ? ' <span class="muted" style="font-weight:400">· vendor</span>' : ''}</div>
@@ -309,6 +311,7 @@ async function load() {
       <button class="icon" title="Logs" onclick="showLog('${a.label}')">≣</button>
     </div>`;
   }).join("");
+  reattachLog();
 }
 
 async function act(label, what) {
@@ -334,13 +337,37 @@ async function refreshLog(fallbackTitle) {
   if (pinned) el.scrollTop = el.scrollHeight;
 }
 
+// Park the panel directly under the row it belongs to. Moving the existing NODE keeps
+// its content, the follow checkbox and the follow ticker intact.
+function placeLog() {
+  if (!openLog) return false;
+  const row = document.querySelector(`[data-log-key="${openLog}"]`);
+  if (!row) return false;
+  if (row.nextElementSibling !== $("logwrap")) row.after($("logwrap"));
+  return true;
+}
+
+// The 30s poll rewrites the lists' innerHTML, which would orphan an open panel —
+// re-place it after every render, or close it if its row is gone.
+function reattachLog() {
+  if (!openLog) return;
+  if (!placeLog()) {
+    $("logwrap").classList.remove("open");
+    openLog = null;
+    logURL = null;
+  }
+}
+
 async function openLogPanel(key, url, title) {
   if (openLog === key) { $("logwrap").classList.remove("open"); openLog = null; logURL = null; return; }
   openLog = key;
   logURL = url;
   await refreshLog(title);
+  placeLog();
   $("logwrap").classList.add("open");
-  $("logwrap").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  // block:"nearest" is a no-op when the panel is already visible — the old jump came
+  // from the panel living at the bottom of the page, not from this call.
+  $("logwrap").scrollIntoView({ block: "nearest" });
 }
 
 // The follow ticker no-ops unless the panel is open and the box is checked.
@@ -390,7 +417,7 @@ async function loadApps() {
     const login = a.login ? ' <span class="muted" style="font-weight:400;font-size:11px">· at login</span>' : "";
     const shownPort = a.port_mismatch ? a.open_port : a.port;
     const portTag = shownPort ? ` <span class="muted" style="font-weight:400">· :${shownPort}</span>` : "";
-    return `<div class="row">
+    return `<div class="row" data-log-key="app:${a.slug}">
       <span class="dot ${dot}"></span>
       <div class="meta">
         <div class="lbl mono">${a.name}${login}${portTag}</div>
@@ -400,6 +427,7 @@ async function loadApps() {
       <button class="icon" title="Logs" onclick="showAppLog('${a.slug}')">≣</button>
     </div>`;
   }).join("");
+  reattachLog();
 }
 
 async function scanApps() {
