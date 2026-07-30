@@ -38,16 +38,28 @@ CANDIDATE_ROOTS = [
 ]
 
 
+def dir_identity(path: Path) -> Optional[tuple]:
+    """(device, inode) — filesystem identity, the only reliable way to tell whether two
+    paths are the same directory. `resolve()` is NOT enough: macOS volumes are usually
+    case-INsensitive, so ~/projects and ~/Projects are one directory under two spellings
+    that resolve() reports as different (observed live: every project listed twice).
+    Lowercasing would be wrong on case-sensitive volumes; inodes are right on both."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def scan_roots(candidates: Optional[list[Path]] = None) -> list[Path]:
-    """The candidate roots that exist on this machine, de-duplicated (macOS paths are
-    case-insensitive, so ~/projects and ~/Projects can resolve to the same dir)."""
+    """The candidate roots that exist on this machine, one entry per real directory."""
     seen: set = set()
     out: list[Path] = []
     for root in candidates if candidates is not None else CANDIDATE_ROOTS:
         if not root.is_dir():
             continue
-        key = root.resolve()
-        if key in seen:
+        key = dir_identity(root)
+        if key is None or key in seen:
             continue
         seen.add(key)
         out.append(root)
@@ -175,20 +187,23 @@ def discover_apps(
     known_dirs = {spec.dir for spec in existing}
     dashboard_root = str(CONFIG_PATH.parent)
     out: list[dict] = []
-    seen_dirs: set[str] = set()
+    # Keyed by filesystem identity, not path text: two roots can spell the same
+    # directory differently (see dir_identity), which listed every project twice.
+    seen_dirs: set = set()
     for root in roots:
         if not root.is_dir():
             continue
         for project in sorted(root.iterdir()):
             p = str(project)
-            if p in seen_dirs or p == dashboard_root:
+            ident = dir_identity(project)
+            if (ident is not None and ident in seen_dirs) or p == dashboard_root:
                 continue
             if not project.is_dir() or not (project / ".git").exists():
                 continue
             candidate = classify_project(project)
             if not candidate:
                 continue
-            seen_dirs.add(p)
+            seen_dirs.add(ident)
             candidate["blocked"] = tcc_blocked(p)
             candidate["already"] = p in known_dirs
             out.append(candidate)
