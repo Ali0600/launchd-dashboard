@@ -324,54 +324,62 @@ async function act(label, what) {
 
 let logURL = null;
 
+// The panel gets MOVED under whichever row was clicked, which parks it inside a list
+// whose innerHTML the 30s poll replaces — that DESTROYS child nodes, so a fresh
+// getElementById would return null (and `row.after(null)` writes a literal "null" into
+// the page). Holding the node in a variable keeps it alive while detached, and its
+// children must be reached THROUGH it for the same reason.
+const logPanel = $("logwrap");
+const logPart = (id) => logPanel.querySelector("#" + id);
+
 async function refreshLog(fallbackTitle) {
   if (!openLog || !logURL) return;
   const r = await fetch(logURL);
   const j = await r.json();
-  $("logpath").textContent = j.path || fallbackTitle || "";
-  $("lognote").textContent = j.note || "";
-  const el = $("log");
+  logPart("logpath").textContent = j.path || fallbackTitle || "";
+  logPart("lognote").textContent = j.note || "";
+  const el = logPart("log");
   // Keep the view pinned to the bottom while following, unless the user scrolled up.
   const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   el.textContent = j.text || "(empty)";
   if (pinned) el.scrollTop = el.scrollHeight;
 }
 
-// Park the panel directly under the row it belongs to. Moving the existing NODE keeps
-// its content, the follow checkbox and the follow ticker intact.
+/** Park the panel directly under the row it belongs to. Returns false when that row
+ * isn't on the page (filtered out, app removed). */
 function placeLog() {
   if (!openLog) return false;
   const row = document.querySelector(`[data-log-key="${openLog}"]`);
   if (!row) return false;
-  if (row.nextElementSibling !== $("logwrap")) row.after($("logwrap"));
+  if (row.nextElementSibling !== logPanel) row.after(logPanel);
   return true;
 }
 
-// The 30s poll rewrites the lists' innerHTML, which would orphan an open panel —
-// re-place it after every render, or close it if its row is gone.
+// Called after every list render: re-insert the (now detached) panel under its row,
+// or give up and close it when the row is gone.
 function reattachLog() {
   if (!openLog) return;
   if (!placeLog()) {
-    $("logwrap").classList.remove("open");
+    logPanel.classList.remove("open");
     openLog = null;
     logURL = null;
   }
 }
 
 async function openLogPanel(key, url, title) {
-  if (openLog === key) { $("logwrap").classList.remove("open"); openLog = null; logURL = null; return; }
+  if (openLog === key) { logPanel.classList.remove("open"); openLog = null; logURL = null; return; }
   openLog = key;
   logURL = url;
   await refreshLog(title);
   placeLog();
-  $("logwrap").classList.add("open");
+  logPanel.classList.add("open");
   // block:"nearest" is a no-op when the panel is already visible — the old jump came
   // from the panel living at the bottom of the page, not from this call.
-  $("logwrap").scrollIntoView({ block: "nearest" });
+  logPanel.scrollIntoView({ block: "nearest" });
 }
 
 // The follow ticker no-ops unless the panel is open and the box is checked.
-setInterval(() => { if ($("follow").checked) refreshLog(); }, 2000);
+setInterval(() => { if (logPart("follow").checked) refreshLog(); }, 2000);
 
 async function showLog(label, keep) {
   if (keep && openLog === label) { await refreshLog(label); return; }
