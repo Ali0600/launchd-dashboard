@@ -23,13 +23,21 @@ deterministic and read-honest.
   **the project directory it belongs to** (cwd, or mined from the command line), and the
   launchd agent it runs under — plus a "is port X free?" checker, an **exposed** flag for
   ports bound beyond loopback, and a two-tap SIGTERM for reclaiming a port. Apple system
-  listeners (AirPlay etc.) are hidden by default but still count as "taken".
+  listeners (AirPlay etc.) are hidden by default but still count as "taken". Ports declared
+  by a configured app that isn't currently serving them show as **claimed** (with a start
+  button), so a project's port stays visible when its process isn't running.
 - **App launcher**: declare your dev servers once in `apps.json` (dir, command, port) and
   start/stop them from the dashboard — no more hunting terminals for `npm run dev`. Each
   launched app runs as a **transient launchd agent** (`com.launchddash.app.<slug>`), so
   status, last-exit health, log tailing, and port→app attribution all come from the same
   machinery as everything else; stopping removes the agent completely. Apps in
   TCC-protected folders are shown as blocked with the reason instead of failing cryptically.
+  Restart, an optional `"login": true` (comes back at next login) and per-app `env` are
+  supported; **✕ Remove** stops an app, deletes its plist and drops its config entry (freeing
+  its claimed port) without ever touching your project files. The Open button targets the port
+  the app *actually* serves, and flags drift when that isn't the one it declared.
+- **Scan for projects**: one click finds launchable git repos across your project roots and
+  writes their entries for you — including repairing the path of a project you've **moved**.
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 
@@ -78,7 +86,8 @@ out of TCC-protected folders (see Quickstart) and adjust the paths.
 | GET | `/api/ports?all=false` | listening TCP ports with process/project/agent attribution (`all=true` includes system listeners) |
 | POST | `/api/ports/{pid}/kill` | SIGTERM a listener (refused unless the pid currently holds a listening port) |
 | GET | `/api/apps` | configured apps with live status (running/stopped/exited/failed/blocked) |
-| POST | `/api/apps/{slug}/{start,stop}` | launch as / remove a transient launchd agent (slugs only — commands never cross HTTP) |
+| POST | `/api/apps/{slug}/{start,stop,restart}` | launch / stop / restart as a transient launchd agent (slugs only — commands never cross HTTP) |
+| DELETE | `/api/apps/{slug}` | un-manage an app: stop it, delete its plist, drop its `apps.json` entry (project files untouched) |
 | GET | `/api/apps/{slug}/log?lines=200` | tail a launched app's log |
 | GET | `/api/apps/discover` | scan the roots for launchable git projects (server-side inference) |
 | POST | `/api/apps/adopt` | add scanned candidates to apps.json by slug (append-only; never rewrites your edits) |
