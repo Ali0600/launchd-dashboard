@@ -22,8 +22,10 @@ deterministic and read-honest.
 - **Port tracker**: every listening TCP port on the machine, attributed to its process,
   **the project directory it belongs to** (cwd, or mined from the command line), and the
   launchd agent it runs under — plus a "is port X free?" checker, an **exposed** flag for
-  ports bound beyond loopback, and a two-tap SIGTERM for reclaiming a port. Apple system
-  listeners (AirPlay etc.) are hidden by default but still count as "taken". Ports declared
+  ports bound beyond loopback, an **↗ open** button per port (`http://localhost:<port>` — by
+  name, so it reaches the server whether it bound IPv4 or IPv6), and a two-tap SIGTERM for
+  reclaiming a port. Apple system listeners (AirPlay etc.) are hidden by default but still
+  count as "taken" (and get no open button — they aren't web pages). Ports declared
   by a configured app that isn't currently serving them show as **claimed** (with a start
   button), so a project's port stays visible when its process isn't running.
 - **App launcher**: declare your dev servers once in `apps.json` (dir, command, port) and

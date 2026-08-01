@@ -448,7 +448,7 @@ async function loadApps() {
       ? `<span style="color:#f08b86">${a.dir} is TCC-protected — move it out of Documents/Desktop/Downloads to launch</span>`
       : `${a.command} · ${a.dir}${a.pid ? ` · pid ${a.pid}` : ""}${a.last_exit != null && a.status !== "running" ? ` · exit ${a.last_exit}` : ""}${note}${drift}${sharedNote}`;
     const open = a.status === "running" && a.open_port
-      ? `<button onclick="window.open('http://127.0.0.1:${a.open_port}','_blank')" title="Open in browser">↗</button>` : "";
+      ? `<button onclick="window.open('http://localhost:${a.open_port}','_blank')" title="Open http://localhost:${a.open_port}">↗</button>` : "";
     // A missing dir can only fail to start — offer Logs + Remove and nothing else.
     const action = a.blocked || a.missing ? ""
       : a.status === "running"
@@ -595,12 +595,19 @@ async function loadPorts() {
     const agent = p.agent ? ` <span class="pill run mono">${p.agent}</span>` : "";
     const exposed = p.localhost ? "" : ` <span class="pill bad" title="bound beyond loopback — reachable from the LAN">exposed</span>`;
     const sys = p.system ? ` <span class="pill off">system</span>` : "";
+    // Open by NAME, not the IPv4 literal: `localhost` resolves to ::1 or 127.0.0.1, so it
+    // reaches the server whichever family it bound (a Vite/Next default bind is IPv6-only
+    // here, where http://127.0.0.1:PORT is refused). It's also the host dev servers'
+    // Host-header allowlists expect — an IP hits their cross-origin warning.
+    // System listeners (AirPlay etc.) get no button: they aren't web pages.
+    const openBtn = p.system ? ""
+      : `<button onclick="window.open('http://localhost:${p.port}','_blank')" title="Open http://localhost:${p.port}">↗</button>`;
     return `<div class="row">
       <span class="dot ${p.localhost ? "ok" : "bad"}"></span>
       <div class="meta">
         <div class="lbl mono">:${p.port} <span class="muted" style="font-weight:400">· ${p.command}</span></div>
         <div class="sub mono" title="${(p.args || "").replace(/"/g, "&quot;")}">${where || "—"} · pid ${p.pid} · ${p.addresses.join(", ")}</div>
-      </div>${agent}${exposed}${sys}
+      </div>${agent}${exposed}${sys}${openBtn}
       <button class="icon" id="kill-${p.pid}" title="SIGTERM this process" onclick="killPort(${p.pid})">✕</button>
     </div>`;
   }).join("");

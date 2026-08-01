@@ -61,6 +61,31 @@ def test_claimed_port_rows_render_without_a_kill_button():
     assert "appAct(" in claimed_block
 
 
+def test_live_port_rows_open_by_name_not_by_ipv4_literal():
+    """`localhost` resolves to ::1 OR 127.0.0.1, so it reaches the server whichever family
+    it bound — a Vite/Next default bind is IPv6-only, where http://127.0.0.1:PORT is
+    refused. It's also the host dev servers' Host-header allowlists expect."""
+    js = script()
+    ports_render = js.split('$("portlist").innerHTML', 1)[1].split("function ", 1)[0]
+    assert "window.open('http://localhost:${p.port}'" in ports_render
+    assert "127.0.0.1:${p.port}" not in ports_render
+    # System listeners (AirPlay etc.) aren't web pages — no button for them.
+    assert "p.system ? \"\"" in ports_render
+
+
+def test_app_rows_open_by_name_too():
+    js = script()
+    assert "window.open('http://localhost:${a.open_port}'" in js
+    assert "window.open('http://127.0.0.1:" not in js
+
+
+def test_claimed_rows_have_no_open_button():
+    """Nothing is serving a claimed port — Open would just fail; it gets a start button."""
+    js = script()
+    claimed = js.split('if (p.kind === "claimed")', 1)[1].split("const where =", 1)[0]
+    assert "window.open" not in claimed
+
+
 def test_port_checker_reports_free_but_declared():
     js = script()
     checker = js.split("function checkPort", 1)[1]
