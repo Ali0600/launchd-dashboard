@@ -10,7 +10,10 @@ agents, tracks listening ports, and launches dev apps as transient agents. See
 - `app/apps.py` — the app launcher: `apps.json` parsing, plist generation, start/stop/restart/remove.
 - `app/discover.py` — "Scan for projects": root scanning, launch inference, adoption.
 - `app/annotations.py` — `labels.json` (purpose/repo/note per job).
-- `app/main.py` — routes **plus the entire UI** as one `PAGE` string (HTML + inline JS).
+- `app/netwatch.py` — network watch: connection parsing, remote classification, the
+  observe() diff rules, ack allow-lists, osascript notifier, `netwatch.json` state.
+- `app/main.py` — routes **plus the entire UI** as one `PAGE` string (HTML + inline JS),
+  and the background watcher loop (lifespan task).
 - `tests/` — pytest, fixtures only; no live `launchctl`/`lsof` in tests.
 
 ## Common commands
@@ -74,6 +77,24 @@ agents, tracks listening ports, and launches dev apps as transient agents. See
   interfaces unless `-H 127.0.0.1` is passed, so adopted Next apps are exposed by default; Expo's
   `:8081` is exposed on purpose (the phone must reach Metro). Verify a claim like this by curling
   the machine's own LAN IP, not by reading the flag.
+- **`osascript display notification` DOES fire from a launchd agent** (spike-verified
+  2026-08-04, user confirmed the banner on screen — exit 0 alone proves nothing). The
+  script string must be escaped backslashes-FIRST-then-quotes (`_osa_str`): a listener's
+  command name is attacker-influenced text and must never break out of the AppleScript
+  string. Same reason the watch UI escapes every interpolation and rides ack targets in
+  `data-` attributes with one delegated listener — never inline `onclick='…${key}…'`.
+- **The network watch seeds SILENTLY on first run** — the value is the diff, and a
+  day-one storm of 20 banners about your existing setup would train the user to ignore
+  the channel. Corollary: deleting `netwatch.json` re-seeds (no alerts until something
+  *changes* again); a corrupt file is parked as `.bak`, never overwritten blind.
+- **Exposure outranks attribution in the watch rules.** An agent- or project-attributed
+  listener is log-only on loopback but BANNERS when bound `*` — your own `next dev`
+  without `-H` is exactly the case to catch. Per-key acks likewise don't survive a
+  loopback→exposed flip (a new fact); only `acked_commands` silences a command entirely
+  (Chrome binds `*` on a fresh random port per session, so per-key ack can't quiet it).
+- **`/api/ports` and the watcher share ONE scan path** (`_scan_ports()` in main.py).
+  Don't add a second listener-scan/attribution assembly — two paths answering "who
+  holds this port?" will drift, which is the moved-project bug all over again.
 - **Dependency floors must stay Python-3.9-installable** (`run.sh` uses the system `python3`).
   `fastapi>=0.129` / `uvicorn>=0.40` / `pytest>=9` need ≥3.10 and are ignored in `dependabot.yml`;
   CI runs 3.12 and cannot catch this — dry-run any floor bump on the 3.9 venv. PRs also run the

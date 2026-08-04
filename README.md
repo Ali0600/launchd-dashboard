@@ -40,6 +40,16 @@ deterministic and read-honest.
   the app *actually* serves, and flags drift when that isn't the one it declared.
 - **Scan for projects**: one click finds launchable git repos across your project roots and
   writes their entries for you — including repairing the path of a project you've **moved**.
+- **Network watch**: the always-on agent diffs the port scan every 30s and **alerts** —
+  native macOS banners plus an in-page alerts section and a `(N!)` title badge — when a
+  **new process starts listening**, a listener **flips from loopback to LAN-exposed**, or
+  **another device actually connects** to one of your servers (your own Wi-Fi devices are
+  distinguished from public internet addresses). One tap acknowledges an alert forever;
+  "allow app" whitelists a command that binds a fresh random port every session (Chrome).
+  The first scan seeds silently — you're alerted about *changes*, not your existing setup.
+  **Honest scope**: this is polling `lsof` as your user, not an IDS — it cannot see port
+  scans, connections shorter than the poll interval, or outbound traffic. For outbound
+  control or packet-level detection, use a firewall like Little Snitch or LuLu.
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 
@@ -93,6 +103,8 @@ out of TCC-protected folders (see Quickstart) and adjust the paths.
 | GET | `/api/apps/{slug}/log?lines=200` | tail a launched app's log |
 | GET | `/api/apps/discover` | scan the roots for launchable git projects (server-side inference) |
 | POST | `/api/apps/adopt` | add scanned candidates to apps.json by slug (append-only; never rewrites your edits) |
+| GET | `/api/watch` | network-watch state: active alerts, recent events, watcher health |
+| POST | `/api/watch/ack` | acknowledge an alert (`{"key": …}`) or always-allow a command (`{"command": …}`) — only server-minted active alerts are accepted |
 
 ## Launch your dev apps
 
@@ -179,3 +191,8 @@ live machine.
   encoded the constraint as a first-class "blocked" state in the UI instead of a cryptic error.
 - Cut steady-state overhead with a **TTL-memoized subprocess layer** (one `launchctl` sweep
   serves three polling endpoints, invalidated on every mutation so actions never read stale).
+- Added a **background network-monitoring loop with native alerting**: async watcher inside
+  the service diffs listener/connection scans against a persisted baseline, classifies
+  remote endpoints (loopback / private / public, failing closed on unparseable input),
+  posts injection-safe macOS notifications from a daemon context, and exposes an
+  acknowledge workflow whose allow-lists only accept server-minted keys.

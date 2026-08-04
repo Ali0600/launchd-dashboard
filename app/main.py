@@ -7,16 +7,79 @@ jobs, so the dashboard is not meant to be exposed beyond your machine.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import annotations, apps, discover, launchd, ports
+from . import annotations, apps, discover, launchd, netwatch, ports
 
 # Last discovery scan, server-side. Adoption only ever references these by slug —
 # the browser never supplies a directory or command.
 _discovered: list = []
 
-app = FastAPI(title="launchd dashboard")
+WATCH_INTERVAL_S = 30
+_watch_status = {"errors": 0, "last_run": None}
+
+
+def _scan_ports() -> "tuple[list, list]":
+    """The ONE listener scan + attribution path — used by /api/ports AND the network
+    watcher. Two paths answering "who holds this port?" would drift (the moved-project
+    bug all over again), so both go through here."""
+    # vendor agents included on purpose: a vendor job holding a port is still
+    # the answer to "who has :XXXX?"
+    agents = launchd.list_agents(include_vendor=True)
+    agent_pids = {a["pid"]: a["label"] for a in agents if a["pid"]}
+    # Dashboard-launched apps are filtered out of list_agents (they live in the Apps
+    # section), so add their pids here or their ports would lose attribution.
+    specs = apps.load_apps()
+    for spec in specs:
+        info = apps.describe(spec)
+        if info["pid"]:
+            agent_pids[info["pid"]] = spec.label
+    return ports.list_ports(agent_pids), specs
+
+
+def _watch_once() -> None:
+    """One network-watch cycle: scan, diff against the known set, banner the news."""
+    scanned, _specs = _scan_ports()
+    inb = netwatch.inbound(netwatch.established(), {e["port"] for e in scanned})
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with netwatch.STATE_LOCK:
+        state = netwatch.load_state()
+        events = netwatch.observe(state, scanned, inb, now)
+        netwatch.save_state(state)
+    _watch_status["last_run"] = now
+    banners = [ev for ev in events if ev["banner"]]
+    if len(banners) > 3:  # collapse a storm into one banner; details are in the page
+        netwatch.post_notification(
+            "launchd dashboard", f"{len(banners)} new network events — open the dashboard"
+        )
+    else:
+        for ev in banners:
+            netwatch.post_notification("launchd dashboard", ev["summary"])
+
+
+async def _watch_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_watch_once)
+        except Exception as exc:  # a dead watcher must announce itself, not just stop
+            _watch_status["errors"] += 1
+            apps.warn(f"network watch cycle failed: {exc!r}")
+        await asyncio.sleep(WATCH_INTERVAL_S)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    task = asyncio.create_task(_watch_loop())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="launchd dashboard", lifespan=_lifespan)
 
 
 def _app_or_404(slug: str) -> apps.AppSpec:
@@ -169,18 +232,7 @@ def api_app_log(slug: str, lines: int = 200) -> dict:
 
 @app.get("/api/ports")
 def api_ports(all: bool = False) -> JSONResponse:
-    # vendor agents included on purpose: a vendor job holding a port is still
-    # the answer to "who has :XXXX?"
-    agents = launchd.list_agents(include_vendor=True)
-    agent_pids = {a["pid"]: a["label"] for a in agents if a["pid"]}
-    # Dashboard-launched apps are filtered out of list_agents (they live in the Apps
-    # section), so add their pids here or their ports would lose attribution.
-    specs = apps.load_apps()
-    for spec in specs:
-        info = apps.describe(spec)
-        if info["pid"]:
-            agent_pids[info["pid"]] = spec.label
-    scanned = ports.list_ports(agent_pids)
+    scanned, specs = _scan_ports()
     # A port held by a hidden *system* listener is still taken, so the claimed set is
     # derived from the whole scan — never from the display-filtered rows.
     live = {e["port"] for e in scanned}
@@ -196,6 +248,37 @@ def api_ports(all: bool = False) -> JSONResponse:
 @app.post("/api/ports/{pid}/kill")
 def api_kill_port(pid: int) -> dict:
     return ports.kill_listener(pid)
+
+
+@app.get("/api/watch")
+def api_watch() -> dict:
+    with netwatch.STATE_LOCK:
+        state = netwatch.load_state()
+    active = state.get("active") or {}
+    return {
+        "active": [{"key": k, **v} for k, v in active.items()],
+        "events": (state.get("events") or [])[:50],
+        "seeded_at": state.get("seeded_at"),
+        "errors": _watch_status["errors"],
+        "last_run": _watch_status["last_run"],
+    }
+
+
+@app.post("/api/watch/ack")
+def api_watch_ack(payload: dict = Body(...)) -> dict:
+    """Acknowledge by key (this alert) or command (always allow that app). Both are
+    validated against server-minted ACTIVE alerts inside netwatch — the browser can't
+    seed the allow-lists with arbitrary strings."""
+    key = payload.get("key")
+    command = payload.get("command")
+    if not isinstance(key, str) and not isinstance(command, str):
+        raise HTTPException(status_code=400, detail='body must be {"key": …} or {"command": …}')
+    with netwatch.STATE_LOCK:
+        state = netwatch.load_state()
+        res = netwatch.ack(state, key) if isinstance(key, str) else netwatch.ack_command(state, command)
+        if res["ok"]:
+            netwatch.save_state(state)
+    return res
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -219,7 +302,7 @@ PAGE = """<!DOCTYPE html>
   header .title { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .ok { background: #36c08f; } .run { background: #4a9be8; } .bad { background: #e2554f; }
-  .off { background: #6b7280; }
+  .off { background: #6b7280; } .warn { background: #f0b86e; }
   .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
   .card { background: #171a21; border-radius: 10px; padding: 14px 16px; }
   .card .k { font-size: 12px; color: #8b909c; } .card .v { font-size: 24px; font-weight: 600; margin-top: 2px; }
@@ -232,6 +315,7 @@ PAGE = """<!DOCTYPE html>
   .pill { font-size: 11px; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
   .pill.ok { background: #15311f; color: #5fd2a0; } .pill.bad { background: #3a1714; color: #f08b86; }
   .pill.off { background: #23262e; color: #9aa0ac; } .pill.run { background: #122436; color: #74b3ee; }
+  .pill.warn { background: #33270f; color: #f0b86e; }
   button { background: #1d212a; color: #d7dae1; border: 0.5px solid #333845; border-radius: 8px;
            padding: 6px 10px; font-size: 13px; cursor: pointer; }
   button:hover { background: #242935; } button:active { transform: scale(.97); }
@@ -290,6 +374,11 @@ PAGE = """<!DOCTYPE html>
     </span>
   </div>
   <div class="list" id="portlist"><div class="empty">Loading…</div></div>
+  <div class="section" style="display:flex;align-items:center;justify-content:space-between">
+    <span>Network watch</span>
+    <span class="muted" id="watchmeta" style="text-transform:none;letter-spacing:0"></span>
+  </div>
+  <div class="list" id="watchlist"><div class="empty">Loading…</div></div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -641,7 +730,56 @@ function checkPort() {
   else { el.innerHTML = `<span class="pill ok">free</span>`; }
 }
 
-function loadAll() { load(); loadApps(); loadPorts(); }
+// ---- Network watch --------------------------------------------------------
+// Alert summaries and keys embed process COMMAND NAMES — arbitrary text. Everything
+// interpolated into HTML goes through esc(), and ack targets ride in data-attributes
+// with one delegated listener: inline onclick="ack('${key}')" would let a quote in a
+// process name break out of the JS string.
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function loadWatch() {
+  const r = await fetch("/api/watch");
+  const w = await r.json();
+  const n = w.active.length;
+  document.title = n ? `(${n}!) launchd dashboard` : "launchd dashboard";
+  $("watchmeta").textContent =
+    (w.errors ? `⚠ ${w.errors} watch errors · ` : "") +
+    (w.seeded_at ? `watching since ${new Date(w.seeded_at).toLocaleDateString()}` : "first scan pending…");
+  const active = w.active.slice().reverse().map(a => `<div class="row">
+      <span class="dot ${a.severity === "bad" ? "bad" : "warn"}"></span>
+      <div class="meta">
+        <div class="lbl">${esc(a.summary)}</div>
+        <div class="sub">${esc(a.kind)} · ${rel(a.ts)}</div>
+      </div>
+      <span class="pill ${a.severity === "bad" ? "bad" : "warn"}">${a.severity === "bad" ? "alert" : "notice"}</span>
+      <button data-ack="${esc(a.key)}" title="OK — never alert for this again">OK</button>
+      ${a.key.startsWith("listen:") ? `<button data-ackcmd="${esc(a.command)}" title="Always allow ${esc(a.command)} on any port">allow app</button>` : ""}
+    </div>`);
+  const recent = w.events.slice(0, 10).map(e => `<div class="row" style="opacity:.55">
+      <span class="dot ${e.banner ? (e.severity === "bad" ? "bad" : "warn") : "off"}"></span>
+      <div class="meta"><div class="sub">${esc(e.summary)} · ${rel(e.ts)}</div></div>
+    </div>`);
+  $("watchlist").innerHTML = active.concat(recent).join("") ||
+    `<div class="empty">Nothing new — fresh listeners, LAN exposure, and inbound connections will show up here.</div>`;
+}
+
+// Delegated: the handler lives on the container, which innerHTML never replaces.
+$("watchlist").onclick = async (ev) => {
+  const b = ev.target.closest("button[data-ack],button[data-ackcmd]");
+  if (!b) return;
+  const body = b.dataset.ack ? { key: b.dataset.ack } : { command: b.dataset.ackcmd };
+  const r = await fetch("/api/watch/ack", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json();
+  toast(j.ok ? j.detail : `ack failed: ${j.detail}`);
+  loadWatch();
+};
+
+function loadAll() { load(); loadApps(); loadPorts(); loadWatch(); }
 $("refresh").onclick = loadAll;
 $("showVendor").onchange = load;
 $("showSystem").onchange = loadPorts;
