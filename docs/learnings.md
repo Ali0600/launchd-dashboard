@@ -44,3 +44,38 @@ always worked) fixed it with no settings changes.
 **Takeaway:** put anything a background agent must read outside TCC-protected folders —
 and read the errno: `Operation not permitted` (EPERM) with correct Unix permission bits
 means a sandbox/TCC layer, not `chmod`.
+
+## What "detecting an intruder" means without root: diff the lsof scan, don't promise an IDS
+
+User-level polling of `lsof` can genuinely detect three things: a **new process
+listening** (backdoors, but also SSH/Screen Sharing being switched on), a listener
+**flipping from loopback to LAN-exposed**, and **established inbound connections**
+(classified loopback / private / public via stdlib `ipaddress`). It structurally cannot
+see port scans (packet-level, needs root), connections shorter than the poll interval
+(sampling blind spot), or outbound traffic.
+
+**Why it came up:** the user asked to be alerted "if someone is listening on a port or
+if someone is hacking". The always-on dashboard agent already scanned listeners every
+30s — the missing piece was only a persisted baseline to diff against, plus alert rules.
+Naming it "Network watch" (not intrusion detection) keeps the promise honest.
+
+**Takeaway:** a monitoring feature is a *diff against a baseline* plus an honest
+statement of the sampling blind spots — seed the baseline silently (a day-one alert
+storm trains users to ignore the channel), alert on transitions only, and say plainly
+what the instrument cannot see.
+
+## macOS banners from a daemon: osascript works, but treat the text as hostile
+
+`osascript -e 'display notification …'` fires real banners from a launchd agent
+(spike-verified — and exit 0 alone is not proof; a human confirmed the banner rendered).
+The notification text embeds process command names, which any local process chooses for
+itself, so the AppleScript string must be escaped backslashes-first-then-quotes or a
+crafted name breaks out of the literal.
+
+**Why it came up:** the network watch posts banners naming the listener that triggered
+them. The same data flows into the dashboard HTML, where it likewise needs entity
+escaping and `data-`-attribute event delegation instead of inline `onclick='…${key}…'`.
+
+**Takeaway:** anything a monitored process can name itself with is untrusted input to
+every sink downstream of the monitor — escape per-context (AppleScript, HTML, JS), and
+prove the escaping with an injection-shaped test.

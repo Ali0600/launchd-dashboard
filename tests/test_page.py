@@ -105,6 +105,41 @@ def test_remove_arms_before_it_deletes():
     assert "loadPorts()" in fn, "a freed port must refresh the ports section"
 
 
+def test_watch_section_is_polled_with_everything_else():
+    js = script()
+    assert 'id="watchlist"' in PAGE
+    loadall = js.split("function loadAll", 1)[1].split("\n", 1)[0]
+    assert "loadWatch()" in loadall
+
+
+def test_watch_title_badge_sets_and_resets():
+    js = script()
+    assert "`(${n}!) launchd dashboard`" in js
+    assert "document.title = n ?" in js  # ternary: resets when nothing is active
+
+
+def test_watch_ack_rides_data_attributes_not_inline_js():
+    """Alert keys and summaries embed process COMMAND NAMES — arbitrary text. An
+    inline onclick with an interpolated key lets a quote in a process name break
+    into JS; data-attributes + one delegated listener keep it inert, and every
+    HTML interpolation in the renderer must pass through esc()."""
+    js = script()
+    watch = js.split("async function loadWatch", 1)[1].split('$("watchlist").onclick', 1)[0]
+    assert 'data-ack="${esc(a.key)}"' in watch
+    assert 'data-ackcmd="${esc(a.command)}"' in watch
+    assert "esc(a.summary)" in watch
+    assert "onclick" not in watch, "no inline handlers in the watch renderer"
+    assert "button[data-ack],button[data-ackcmd]" in js  # the delegated listener
+
+
+def test_watch_allow_app_only_for_listener_alerts():
+    """'Always allow <command>' makes no sense on a connection alert (the command
+    there is our own server); it's offered only for listen: keys."""
+    js = script()
+    watch = js.split("async function loadWatch", 1)[1]
+    assert 'a.key.startsWith("listen:")' in watch
+
+
 def test_rows_carry_the_log_key_the_panel_is_placed_by():
     """placeLog() finds its row by data-log-key; both row templates must emit one,
     matching the keys openLogPanel is called with (label / app:<slug>)."""
