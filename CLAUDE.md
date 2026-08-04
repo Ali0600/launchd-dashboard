@@ -65,6 +65,15 @@ agents, tracks listening ports, and launches dev apps as transient agents. See
 - **`innerHTML =` destroys child nodes.** The log panel is *moved* under the clicked row, so it
   lives inside a list the 30s poll re-renders: it's held in `const logPanel` and its children are
   reached through it (`getElementById` can't see a detached subtree either).
+- **Link to `localhost:<port>`, never the IPv4 literal.** `localhost` resolves to `::1` *or*
+  `127.0.0.1`, so it reaches the server whichever family it bound; a Vite/Next default bind is
+  IPv6-only on macOS, where `http://127.0.0.1:PORT` is refused outright (measured). It's also the
+  host dev servers' Host-header allowlists expect — an IP literal trips their cross-origin warning.
+- **"exposed" = bound to `*` (`0.0.0.0`/`::`), i.e. reachable from the LAN**, not just this Mac —
+  `is_localhost()` requires *every* bound address to be loopback. Note `next dev` binds all
+  interfaces unless `-H 127.0.0.1` is passed, so adopted Next apps are exposed by default; Expo's
+  `:8081` is exposed on purpose (the phone must reach Metro). Verify a claim like this by curling
+  the machine's own LAN IP, not by reading the flag.
 - **Dependency floors must stay Python-3.9-installable** (`run.sh` uses the system `python3`).
   `fastapi>=0.129` / `uvicorn>=0.40` / `pytest>=9` need ≥3.10 and are ignored in `dependabot.yml`;
   CI runs 3.12 and cannot catch this — dry-run any floor bump on the 3.9 venv. PRs also run the
