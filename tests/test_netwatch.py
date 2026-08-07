@@ -620,3 +620,16 @@ def test_archive_size_is_zero_when_absent(tmp_path):
     assert archive_size(p) == 0
     archive_records([{"ts": T1, "kind": "x"}], [], p)
     assert archive_size(p) > 0
+
+
+def test_every_entry_carries_live_after_one_cycle():
+    """A legacy entry that hasn't been SEEN since the upgrade never reaches _touch,
+    so the absence pass must set `live` unconditionally — otherwise a consumer
+    reading entry["live"] raises (found live: a verification script crashed on it).
+    first_seen/sessions stay absent: we have no data, and inventing it would lie."""
+    state = {"seeded_at": T0, "known": {"listen:gone:9737": {"exposed": True}}}
+    assert observe(state, [], [], T1) == []
+    entry = state["known"]["listen:gone:9737"]
+    assert entry["live"] is False
+    assert "first_seen" not in entry
+    assert entry["exposed"] is True  # untouched

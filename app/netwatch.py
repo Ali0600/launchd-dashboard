@@ -280,8 +280,13 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
     # Anything not in this scan is no longer live. The entry is NEVER dropped — it's
     # the roster ("this device has connected 14× since Aug 4") and the reason a card
     # can say "last seen listening 2h ago" instead of just "not listening anymore".
+    # `live` is set unconditionally (not only when it was previously true) so that after
+    # ONE cycle every entry carries the field — including a legacy entry that hasn't been
+    # seen since the upgrade, which `_touch` never gets to backfill. A consumer reading
+    # entry["live"] must not have to guess. `first_seen`/`sessions` stay absent for those
+    # until they're actually seen: we have no data, and inventing it would be a lie.
     for key, entry in known.items():
-        if key not in seen and entry.get("live"):
+        if key not in seen:
             entry["live"] = False
 
     if seeding:
