@@ -387,11 +387,25 @@ PAGE = """<!DOCTYPE html>
            border: 0.5px solid #333845; border-radius: 8px; padding: 9px 14px; font-size: 13px; display: none; }
   .empty { padding: 28px; text-align: center; color: #8b909c; }
   a.vlink { color: #74b3ee; cursor: pointer; text-decoration: underline; }
+  /* Network History sheet — a STATIC overlay (never inside an innerHTML-re-rendered
+     list, per the destroyed-log-panel lesson). Backdrop + right-side sliding panel. */
+  .sheetback { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; z-index: 40; }
+  .sheetback.open { display: block; }
+  .sheet { position: fixed; top: 0; right: 0; height: 100%; width: min(560px, 100vw);
+           background: #0f1115; border-left: 0.5px solid #272b34; transform: translateX(100%);
+           transition: transform .18s ease; overflow-y: auto; z-index: 41;
+           padding: 0 20px 40px; }
+  .sheet.open { transform: translateX(0); }
+  .sheethead { position: sticky; top: 0; background: #0f1115; display: flex; align-items: flex-start;
+               justify-content: space-between; gap: 12px; padding: 20px 0 10px; border-bottom: 0.5px solid #272b34; }
+  .sheethead .h { font-weight: 600; font-size: 16px; }
+  .sheethead .m { font-size: 12px; color: #8b909c; margin-top: 3px; }
 </style></head>
 <body><div class="wrap">
   <header>
     <div class="title"><span>⌁</span> launchd dashboard <span class="muted mono" style="font-size:12px;font-weight:400" id="domain"></span></div>
-    <div style="display:flex;gap:8px">
+    <div style="display:flex;gap:8px;align-items:center">
+      <button id="histBtn" onclick="openHistory()" style="font-size:12px">Network History</button>
       <label class="muted" style="display:flex;align-items:center;gap:6px;font-size:12px">
         <input type="checkbox" id="showVendor"/> show vendor</label>
       <button class="icon" id="refresh" title="Refresh">↻</button>
@@ -429,18 +443,23 @@ PAGE = """<!DOCTYPE html>
   <div class="list" id="portlist"><div class="empty">Loading…</div></div>
   <div class="section" style="display:flex;align-items:center;justify-content:space-between">
     <span>Network watch</span>
-    <span style="display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0">
-      <span class="muted" id="watchmeta"></span>
-      <label class="muted" style="display:flex;align-items:center;gap:6px;font-size:12px">
-        <input type="checkbox" id="showHistory"/> history</label>
-    </span>
+    <span class="muted" id="watchmeta" style="text-transform:none;letter-spacing:0"></span>
   </div>
   <div class="list" id="watchlist"><div class="empty">Loading…</div></div>
-  <div id="historywrap" style="display:none">
-    <div class="section" style="font-size:11px">Notifications sent</div>
-    <div class="list" id="notiflist"></div>
-  </div>
 </div>
+<!-- Network History: a static overlay. It lives OUTSIDE .wrap and is never rebuilt by a
+     list poll, so a re-render can't destroy it (the log-panel lesson). -->
+<div class="sheetback" id="sheetback" onclick="closeHistory()"></div>
+<aside class="sheet" id="histsheet" aria-hidden="true">
+  <div class="sheethead">
+    <div><div class="h">Network History</div><div class="m" id="histmeta"></div></div>
+    <button class="icon" onclick="closeHistory()" title="Close">✕</button>
+  </div>
+  <div class="section">Events</div>
+  <div class="list" id="histevents"></div>
+  <div class="section">Notifications sent</div>
+  <div class="list" id="histnotifs"></div>
+</aside>
 <div class="toast" id="toast"></div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -818,31 +837,52 @@ async function loadWatch() {
       <button data-ack="${esc(a.key)}" title="OK — never alert for this again">OK</button>
       ${a.key.startsWith("listen:") ? `<button data-ackcmd="${esc(a.command)}" title="Always allow ${esc(a.command)} on any port">allow app</button>` : ""}
     </div>`);
-  // history toggle: show the whole event ring, else the recent tail.
-  const depth = $("showHistory").checked ? w.events.length : 10;
-  const recent = w.events.slice(0, depth).map(e => `<div class="row" style="opacity:.55">
+  // The live section shows only the recent tail — the full ring lives in the History sheet.
+  const recent = w.events.slice(0, 10).map(e => `<div class="row" style="opacity:.55">
       <span class="dot ${e.banner ? (e.severity === "bad" ? "bad" : "warn") : "off"}"></span>
       <div class="meta"><div class="sub">${esc(e.summary)}${e.detail ? " · " + esc(e.detail) : ""} · ${rel(e.ts)}</div></div>
     </div>`);
   $("watchlist").innerHTML = active.concat(recent).join("") ||
     `<div class="empty">Nothing new — fresh listeners, LAN exposure, inbound connections, and agent failures will show up here.</div>`;
-  if ($("showHistory").checked) loadNotifications();
 }
 
-// The sent-banner log — larger than the live summary, so fetched only when history is on.
-async function loadNotifications() {
-  const r = await fetch("/api/watch/history?events=0");
+// ---- Network History sheet ------------------------------------------------
+// A static overlay populated from /api/watch/history: the FULL event ring plus every
+// banner the watcher sent (✓ sent / ✗ failed). Fetched only while the sheet is open, so
+// a closed sheet costs zero extra requests. All interpolations go through esc() — the
+// bodies/summaries embed process command names.
+let historyOpen = false;
+
+function openHistory() { historyOpen = true; $("sheetback").classList.add("open");
+  $("histsheet").classList.add("open"); $("histsheet").setAttribute("aria-hidden", "false"); loadHistory(); }
+function closeHistory() { historyOpen = false; $("sheetback").classList.remove("open");
+  $("histsheet").classList.remove("open"); $("histsheet").setAttribute("aria-hidden", "true"); }
+
+async function loadHistory() {
+  const r = await fetch("/api/watch/history");
   const h = await r.json();
-  $("notiflist").innerHTML = (h.notifications || []).map(nt => `<div class="row">
+  const evs = h.events || [], notes = h.notifications || [];
+  $("histmeta").textContent =
+    (h.seeded_at ? `watching since ${new Date(h.seeded_at).toLocaleDateString()} · ` : "") +
+    `${evs.length} events · ${notes.length} banners` +
+    (h.notify_failures ? ` · ✗ ${h.notify_failures} failed sends` : "");
+  $("histevents").innerHTML = evs.map(e => `<div class="row">
+      <span class="dot ${e.banner ? (e.severity === "bad" ? "bad" : "warn") : "off"}"></span>
+      <div class="meta">
+        <div class="sub">${esc(e.summary)}${e.detail ? " · " + esc(e.detail) : ""}</div>
+        <div class="sub muted">${esc(e.kind)} · ${rel(e.ts)}</div>
+      </div>
+    </div>`).join("") || `<div class="empty">No events yet.</div>`;
+  $("histnotifs").innerHTML = notes.map(nt => `<div class="row">
       <span class="pill ${nt.ok ? "ok" : "bad"}">${nt.ok ? "sent" : "failed"}</span>
       <div class="meta">
         <div class="sub">${esc(nt.body)}</div>
         <div class="sub muted">${esc(nt.title)} · ${rel(nt.ts)}</div>
       </div>
-    </div>`).join("") ||
-    `<div class="empty">No banners sent yet.</div>`;
+    </div>`).join("") || `<div class="empty">No banners sent yet.</div>`;
 }
-$("showHistory").onchange = () => { $("historywrap").style.display = $("showHistory").checked ? "" : "none"; loadWatch(); };
+
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && historyOpen) closeHistory(); });
 
 // Delegated: the handler lives on the container, which innerHTML never replaces.
 $("watchlist").onclick = async (ev) => {
@@ -859,7 +899,7 @@ $("watchlist").onclick = async (ev) => {
   loadWatch();
 };
 
-function loadAll() { load(); loadApps(); loadPorts(); loadWatch(); }
+function loadAll() { load(); loadApps(); loadPorts(); loadWatch(); if (historyOpen) loadHistory(); }
 $("refresh").onclick = loadAll;
 $("showVendor").onchange = load;
 $("showSystem").onchange = loadPorts;

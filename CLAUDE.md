@@ -110,11 +110,17 @@ agents, tracks listening ports, and launches dev apps as transient agents. See
   `api_run` (kickstart -k kills first), `api_disable`. **Adding a new endpoint that kills
   or unloads a real agent means adding `_expect_exit(label)` to it.** A manual
   `launchctl kill` from a terminal still banners once — acceptable, and honest.
-- **The watcher RECORDS every banner it sends** (`record_notification`, the history
-  toggle + `/api/watch/history`), successes and failures both; a failed send bumps
+- **The watcher RECORDS every banner it sends** (`record_notification`, the **Network
+  History** sheet + `/api/watch/history`), successes and failures both; a failed send bumps
   `notify_failures`, surfaced in the meta line — a dead notification channel must announce
   itself, same principle as `watch_errors`. `post_notification` runs OUTSIDE the state
   lock (osascript can take seconds); recording re-takes the lock after.
+- **The Network History sheet is STATIC overlay HTML** (`#sheetback` + `#histsheet`,
+  outside `.wrap`), opened by the header button — never built inside a poll-re-rendered
+  list, because `innerHTML` destroys child nodes (the log-panel lesson). `/api/watch/history`
+  is fetched from ONE place (`loadHistory`), and the 30s poll re-fetches it ONLY while the
+  sheet is open (`if (historyOpen)`), so a closed sheet costs zero requests. Every sheet
+  interpolation goes through `esc()` (bodies/summaries embed process command names).
 - **Dependency floors must stay Python-3.9-installable** (`run.sh` uses the system `python3`).
   `fastapi>=0.129` / `uvicorn>=0.40` / `pytest>=9` need ≥3.10 and are ignored in `dependabot.yml`;
   CI runs 3.12 and cannot catch this — dry-run any floor bump on the 3.9 venv. PRs also run the

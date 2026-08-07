@@ -54,10 +54,10 @@ deterministic and read-honest.
   of **your launchd agents fails** — a nonzero exit with nothing running — which is the
   class of silent failure that let a weekly job die unnoticed for eleven days. A
   dashboard-initiated stop/restart is never mistaken for a crash, and recovery clears the
-  alert on its own. Flip on **history** in the Network-watch header to see the full event
-  log *and* every banner the agent tried to send, each marked **sent** or **failed** — so
-  a broken notification channel (or a missed banner) is itself visible, not lost the moment
-  it scrolls off your screen.
+  alert on its own. The **Network History** button in the page header opens a sheet with
+  the full event log *and* every banner the agent tried to send, each marked **sent** or
+  **failed** — so a broken notification channel (or a missed banner) is itself visible, not
+  lost the moment it scrolls off your screen.
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 

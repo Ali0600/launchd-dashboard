@@ -140,21 +140,42 @@ def test_watch_allow_app_only_for_listener_alerts():
     assert 'a.key.startsWith("listen:")' in watch
 
 
-def test_history_toggle_fetches_the_sent_log_only_when_on():
-    """The sent-banner log is larger than the live summary, so it's fetched only while
-    the history toggle is on — the 30s poll must stay cheap."""
+def test_history_is_a_static_sheet_not_a_rerendered_child():
+    """The history moved from an in-section toggle to a header-opened sheet. The sheet
+    must be STATIC page HTML (present outside <script>), so a list re-render can never
+    destroy it — the destroyed-log-panel lesson. The old toggle is gone (one surface)."""
+    body = PAGE.split("<script>", 1)[0]
+    assert 'id="histBtn"' in body and 'id="histsheet"' in body and 'id="sheetback"' in body
+    assert 'onclick="openHistory()"' in body  # header button opens it
+    # the retired toggle + its inline panel must be fully removed (no second surface)
+    assert "showHistory" not in PAGE and "historywrap" not in PAGE and "loadNotifications" not in PAGE
+
+
+def test_history_sheet_fetches_on_demand_only():
+    """The full ring is larger than the live summary, so /api/watch/history is fetched
+    only by the sheet loader — and re-fetched by the 30s poll ONLY while the sheet is
+    open, so a closed sheet costs zero extra requests."""
     js = script()
-    assert 'id="showHistory"' in PAGE and 'id="notiflist"' in PAGE
-    watch = js.split("async function loadWatch", 1)[1].split("async function loadNotifications", 1)[0]
-    assert 'if ($("showHistory").checked) loadNotifications()' in watch
-    # loadNotifications escapes the sent-banner body/title (still process-named text).
-    notif = js.split("async function loadNotifications", 1)[1]
-    assert "esc(nt.body)" in notif and "esc(nt.title)" in notif
+    assert js.count('fetch("/api/watch/history")') == 1, "history fetched from exactly one place (the sheet loader)"
+    hist = js.split("async function loadHistory", 1)[1]
+    assert 'fetch("/api/watch/history")' in hist
+    loadall = js.split("function loadAll", 1)[1].split("\n", 1)[0]
+    assert "if (historyOpen) loadHistory()" in loadall  # poll re-fetch gated on open
+    # every interpolation in the sheet embeds process-named text → esc()
+    assert "esc(e.summary)" in hist and "esc(e.detail)" in hist
+    assert "esc(nt.body)" in hist and "esc(nt.title)" in hist
+
+
+def test_history_sheet_closes_by_backdrop_and_escape():
+    js = script()
+    body = PAGE.split("<script>", 1)[0]
+    assert 'id="sheetback" onclick="closeHistory()"' in body  # backdrop click closes
+    assert 'e.key === "Escape" && historyOpen' in js           # Esc closes
 
 
 def test_watch_renders_detail_and_failed_send_count():
     js = script()
-    watch = js.split("async function loadWatch", 1)[1].split("async function loadNotifications", 1)[0]
+    watch = js.split("async function loadWatch", 1)[1].split("// ---- Network History", 1)[0]
     assert "esc(a.detail)" in watch and "esc(e.detail)" in watch
     assert "failed sends" in watch  # notify_failures surfaced in the meta line
 
