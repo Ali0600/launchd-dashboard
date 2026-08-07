@@ -86,17 +86,20 @@ def _watch_once() -> None:
     posted = []
     if len(banners) > 3:  # collapse a storm into one banner; details are in the page
         body = f"{len(banners)} new events — open the dashboard"
-        posted.append(("launchd dashboard", body, netwatch.post_notification("launchd dashboard", body)))
+        posted.append((now, "launchd dashboard", body,
+                       netwatch.post_notification("launchd dashboard", body)))
     else:
         for ev in banners:
-            posted.append(("launchd dashboard", ev["summary"],
+            posted.append((now, "launchd dashboard", ev["summary"],
                            netwatch.post_notification("launchd dashboard", ev["summary"])))
     if posted:  # record what we actually tried to send (incl. failed sends)
         with netwatch.STATE_LOCK:
             state = netwatch.load_state()
-            for title, body, ok in posted:
+            for _ts, title, body, ok in posted:
                 netwatch.record_notification(state, title=title, body=body, ok=ok, now=now)
             netwatch.save_state(state)
+    # Permanent record last: the capped rings above forget, this file doesn't.
+    netwatch.archive_records(events, posted)
 
 
 async def _watch_loop() -> None:
@@ -302,6 +305,10 @@ def api_watch() -> dict:
         "errors": _watch_status["errors"],
         "last_run": _watch_status["last_run"],
         "notify_failures": state.get("notify_failures", 0),
+        # Sighting stats + run ledger: what an expand card needs to say "last seen 2h
+        # ago" / "connected 14×" / "ran Sunday, exit 0" without a second request.
+        "known": state.get("known") or {},
+        "agent_runs": state.get("agent_runs") or {},
     }
 
 
@@ -318,6 +325,9 @@ def api_watch_history(events: int = 200, notifications: int = 200) -> dict:
         "seeded_at": state.get("seeded_at"),
         "agents_seeded_at": state.get("agents_seeded_at"),
         "notify_failures": state.get("notify_failures", 0),
+        "known": state.get("known") or {},
+        "agent_runs": state.get("agent_runs") or {},
+        "archive_bytes": netwatch.archive_size(),
     }
 
 
@@ -468,6 +478,8 @@ PAGE = """<!DOCTYPE html>
   </div>
   <div class="section">Events</div>
   <div class="list" id="histevents"></div>
+  <div class="section">Devices seen</div>
+  <div class="list" id="histdevices"></div>
   <div class="section">Notifications sent</div>
   <div class="list" id="histnotifs"></div>
 </aside>
@@ -841,6 +853,28 @@ function cardLine(k, v) {
   return `<div class="cl"><span class="ck">${esc(k)}</span><span class="cv">${esc(v)}</span></div>`;
 }
 
+// Sighting stats + the per-agent run ledger, refreshed by whichever of /api/watch or
+// /api/watch/history landed last. They're what turn "not listening anymore" into
+// "last seen 2h ago", and answer "has this job actually run every Sunday?".
+let knownStats = {}, agentRuns = {};
+
+// Legacy conn entries (written before rhost/lport were stored) fall back to parsing
+// the key. Split on the LAST colon — an IPv6 remote is full of them.
+function connParts(key, s) {
+  if (s.rhost) return { rhost: s.rhost, lport: s.lport };
+  const rest = key.slice(5), i = rest.lastIndexOf(":");
+  if (i < 0) return { rhost: rest, lport: null };
+  return { rhost: rest.slice(0, i), lport: Number(rest.slice(i + 1)) || null };
+}
+
+function sightingLines(key, countLabel) {
+  const s = knownStats[key];
+  if (!s || !s.first_seen) return "";  // old event, or a key pruned from the roster
+  return cardLine("first seen", new Date(s.first_seen).toLocaleString())
+    + cardLine("last seen", s.live ? "now" : `${new Date(s.last_seen).toLocaleString()} (${rel(s.last_seen)})`)
+    + cardLine(countLabel, `${s.sessions || 1}×`);
+}
+
 function evCard(e) {
   const d = e.data || {};
   let lines = cardLine("when", new Date(e.ts).toLocaleString())
@@ -854,15 +888,27 @@ function evCard(e) {
     // Live cross-check against the already-polled ports — no extra request.
     const live = portData.find(p => p.kind !== "claimed" && p.command === d.command && p.port === d.port);
     lines += cardLine("now", live ? `still listening (pid ${live.pid})` : "not listening anymore");
+    lines += sightingLines(e.key, "times listening");
     if (d.args) lines += `<div class="cl"><span class="ck">command line</span><span class="cv mono">${esc(d.args)}</span></div>`;
   } else if (d.type === "conn") {
     lines += cardLine("remote", `${d.rhost}:${d.rport}`) + cardLine("device", d.hostname || "—")
       + cardLine("local port", `:${d.lport}`) + cardLine("network", d.remote_class)
       + cardLine("command", `${d.command} (pid ${d.pid})`);
+    lines += sightingLines(e.key, "connections");
   } else if (d.type === "agent") {
     lines += cardLine("exit code", d.last_exit == null ? "—" : d.last_exit)
       + cardLine("status", d.status) + cardLine("schedule", d.schedule)
       + cardLine("program", d.program);
+    // The run ledger: every run this watcher detected, so "did it actually run last
+    // Sunday?" is answerable — the question the recipes job's silent death begs.
+    const runs = agentRuns[d.label] || [];
+    if (runs.length) {
+      lines += `<div class="cl"><span class="ck">recent runs</span><span class="cv">`
+        + runs.slice(0, 8).map(r =>
+            `${esc(new Date(r.ts).toLocaleString())} · exit ${esc(r.exit == null ? "?" : r.exit)}`
+          ).join("<br>")
+        + `</span></div>`;
+    }
     logBtn = `<div style="margin-top:8px"><button data-agentlog="${esc(d.label || "")}">≣ View log</button></div>`;
   }
   return `<div class="evcard">${lines}${logBtn}</div>`;
@@ -890,6 +936,8 @@ let lastWatch = null;
 async function loadWatch() {
   const r = await fetch("/api/watch");
   lastWatch = await r.json();
+  knownStats = lastWatch.known || {};
+  agentRuns = lastWatch.agent_runs || {};
   renderWatch();
 }
 function renderWatch() {
@@ -933,7 +981,38 @@ let lastHistory = null;
 async function loadHistory() {
   const r = await fetch("/api/watch/history");
   lastHistory = await r.json();
+  knownStats = lastHistory.known || {};
+  agentRuns = lastHistory.agent_runs || {};
   renderHistory();
+}
+
+// Every device that ever connected to one of your services, aggregated from the conn
+// sightings — the roster that was implicit in the event history and never browsable.
+function devicesHTML() {
+  const byHost = {};
+  for (const [key, s] of Object.entries(knownStats)) {
+    if (!key.startsWith("conn:")) continue;
+    const { rhost, lport } = connParts(key, s);
+    if (!rhost) continue;
+    const d = byHost[rhost] || (byHost[rhost] =
+      { hostname: "", ports: [], sessions: 0, first: s.first_seen, last: s.last_seen, live: false });
+    if (s.hostname) d.hostname = s.hostname;
+    if (lport && !d.ports.includes(lport)) d.ports.push(lport);
+    d.sessions += s.sessions || 0;
+    if (s.first_seen && (!d.first || s.first_seen < d.first)) d.first = s.first_seen;
+    if (s.last_seen && (!d.last || s.last_seen > d.last)) d.last = s.last_seen;
+    if (s.live) d.live = true;
+  }
+  return Object.entries(byHost)
+    .sort((a, b) => String(b[1].last || "").localeCompare(String(a[1].last || "")))
+    .map(([rhost, d]) => `<div class="row">
+      <span class="dot ${d.live ? "run" : "off"}"></span>
+      <div class="meta">
+        <div class="lbl">${esc(d.hostname || rhost)}</div>
+        <div class="sub mono">${esc(rhost)} · ports ${d.ports.sort((a, b) => a - b).map(p => ":" + esc(p)).join(" ") || "—"} · ${d.sessions}× · first ${rel(d.first)} · last ${rel(d.last)}</div>
+      </div>
+      ${d.live ? `<span class="pill run">connected</span>` : ""}
+    </div>`).join("");
 }
 function renderHistory() {
   const h = lastHistory;
@@ -942,8 +1021,11 @@ function renderHistory() {
   $("histmeta").textContent =
     (h.seeded_at ? `watching since ${new Date(h.seeded_at).toLocaleDateString()} · ` : "") +
     `${evs.length} events · ${notes.length} banners` +
-    (h.notify_failures ? ` · ✗ ${h.notify_failures} failed sends` : "");
+    (h.notify_failures ? ` · ✗ ${h.notify_failures} failed sends` : "") +
+    (h.archive_bytes ? ` · archive ${Math.max(1, Math.round(h.archive_bytes / 1024))} KB` : "");
   $("histevents").innerHTML = evListHTML(evs, false) || `<div class="empty">No events yet.</div>`;
+  $("histdevices").innerHTML = devicesHTML() ||
+    `<div class="empty">No device has connected to your services yet.</div>`;
   $("histnotifs").innerHTML = notes.map(nt => `<div class="row">
       <span class="pill ${nt.ok ? "ok" : "bad"}">${nt.ok ? "sent" : "failed"}</span>
       <div class="meta">

@@ -218,3 +218,57 @@ def test_rows_carry_the_log_key_the_panel_is_placed_by():
     assert 'data-log-key="${a.label}"' in js
     assert 'data-log-key="app:${a.slug}"' in js
     assert '[data-log-key="${openLog}"]' in js
+
+
+def test_devices_roster_is_built_from_conn_sightings():
+    """The roster was implicit in event history and never browsable. It aggregates
+    the persisted conn sightings by remote host — a static sheet section."""
+    js = script()
+    assert 'id="histdevices"' in PAGE
+    fn = js.split("function devicesHTML", 1)[1].split("\nfunction ", 1)[0]
+    assert 'key.startsWith("conn:")' in fn
+    assert "esc(d.hostname || rhost)" in fn  # a device names ITSELF over DHCP/mDNS
+    assert "esc(rhost)" in fn
+    assert '$("histdevices").innerHTML = devicesHTML()' in js
+
+
+def test_legacy_conn_keys_are_split_on_the_LAST_colon():
+    """An IPv6 remote is full of colons, so `conn:<host>:<port>` must not be split
+    naively — entries written before rhost/lport were stored fall back to this."""
+    js = script()
+    fn = js.split("function connParts", 1)[1].split("\nfunction ", 1)[0]
+    assert "lastIndexOf" in fn
+    assert ".split(" not in fn
+
+
+def test_sighting_stats_and_run_ledger_ride_both_watch_fetches():
+    """Either fetch may be the last to land, so both must refresh the caches —
+    otherwise an open sheet shows stats that silently stop updating."""
+    js = script()
+    for loader in ("async function loadWatch", "async function loadHistory"):
+        body = js.split(loader, 1)[1].split("\n}", 1)[0]
+        assert "knownStats =" in body, f"{loader} must refresh knownStats"
+        assert "agentRuns =" in body, f"{loader} must refresh agentRuns"
+
+
+def test_event_cards_show_sightings_and_runs_escaped():
+    js = script()
+    card = js.split("function evCard", 1)[1].split("\nfunction ", 1)[0]
+    assert 'sightingLines(e.key, "times listening")' in card
+    assert 'sightingLines(e.key, "connections")' in card
+    assert "agentRuns[d.label]" in card
+    assert "esc(r.exit ==" in card, "a parsed exit value is still text going into HTML"
+    assert "esc(new Date(r.ts).toLocaleString())" in card
+
+
+def test_missing_stats_degrade_quietly():
+    """Old events (pre-stats) and pruned keys have no entry — the card must omit the
+    lines, never render 'undefined'."""
+    js = script()
+    fn = js.split("function sightingLines", 1)[1].split("\nfunction ", 1)[0]
+    assert "if (!s || !s.first_seen) return \"\";" in fn
+
+
+def test_archive_size_is_surfaced():
+    js = script()
+    assert "h.archive_bytes" in js

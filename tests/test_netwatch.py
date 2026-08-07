@@ -6,8 +6,11 @@ from app.netwatch import (
     _TRANSITION_KINDS,
     EVENT_RING,
     NOTIFY_RING,
+    RUN_LEDGER_CAP,
     ack,
     ack_command,
+    archive_records,
+    archive_size,
     classify_remote,
     conn_key,
     inbound,
@@ -53,10 +56,11 @@ def seeded(listeners=(), conns=()):
 
 
 def A(label="com.groceryhelper.recipes", healthy=True, last_exit=0, status="idle",
-      schedule="Sun 10:00"):
+      schedule="Sun 10:00", last_run=None, pid=None):
     """A launchd.list_agents() row (subset the watcher reads)."""
     return {"label": label, "healthy": healthy, "last_exit": last_exit,
-            "status": status, "schedule": schedule, "vendor": False}
+            "status": status, "schedule": schedule, "vendor": False,
+            "last_run": last_run, "pid": pid}
 
 
 def agents_seeded(agents=()):
@@ -443,3 +447,176 @@ def test_non_dict_state_is_parked_too(tmp_path):
 
 def test_missing_state_is_fresh(tmp_path):
     assert load_state(tmp_path / "netwatch.json") == {}
+
+
+# --------------------------------------------------------------------------- #
+# Sighting stats — what the diff design used to throw away every cycle
+# --------------------------------------------------------------------------- #
+def test_new_keys_get_sighting_stats():
+    state = seeded()
+    observe(state, [L(command="mystery", port=4444)], [C()], T1)
+    for key in ("listen:mystery:4444", conn_key(C())):
+        entry = state["known"][key]
+        assert entry["first_seen"] == T1
+        assert entry["last_seen"] == T1
+        assert entry["live"] is True
+        assert entry["sessions"] == 1
+
+
+def test_resighting_updates_last_seen_without_a_new_session():
+    """A dev server left running all day is ONE session, not one per 30s tick."""
+    state = seeded([L()])
+    observe(state, [L()], [], T1)
+    entry = state["known"]["listen:node:3000"]
+    assert entry["first_seen"] == T0
+    assert entry["last_seen"] == T1
+    assert entry["sessions"] == 1
+
+
+def test_absence_marks_not_live_but_keeps_the_entry():
+    """The entry is the roster — it must survive so a card can say 'last seen 2h ago'."""
+    state = seeded([L()])
+    observe(state, [], [], T1)
+    entry = state["known"]["listen:node:3000"]
+    assert entry["live"] is False
+    assert entry["last_seen"] == T0  # not touched by a scan it wasn't in
+    assert entry["sessions"] == 1
+
+
+def test_reappearance_counts_a_new_session_and_emits_nothing():
+    state = seeded([L()])
+    observe(state, [], [], T1)
+    assert observe(state, [L()], [], T1) == []  # known key: stats only, no alert
+    entry = state["known"]["listen:node:3000"]
+    assert entry["sessions"] == 2
+    assert entry["live"] is True
+
+
+def test_conn_sightings_count_episodes():
+    state = seeded()
+    observe(state, [], [C()], T1)           # first connect: alerts (tested elsewhere)
+    observe(state, [], [], T1)              # gone
+    assert observe(state, [], [C()], T1) == []  # back: never alerts again
+    assert state["known"][conn_key(C())]["sessions"] == 2
+
+
+def test_conn_entries_store_the_fields_the_roster_needs():
+    """Stored, not re-parsed from the key: an IPv6 remote is full of colons, so
+    splitting `conn:<host>:<port>` is a trap."""
+    state = seeded()
+    observe(state, [], [C(rhost="fe80::abc", lport=8081, hostname="phone.local")], T1)
+    entry = state["known"]["conn:fe80::abc:8081"]
+    assert entry["rhost"] == "fe80::abc"
+    assert entry["lport"] == 8081
+    assert entry["hostname"] == "phone.local"
+    # A later lookup that fails must NOT erase a name that resolved once.
+    observe(state, [], [C(rhost="fe80::abc", lport=8081, hostname="")], T1)
+    assert state["known"]["conn:fe80::abc:8081"]["hostname"] == "phone.local"
+
+
+def test_legacy_known_entries_are_backfilled_in_place():
+    """State files written before sighting stats hold `{}` / `{"exposed": bool}`.
+    They must gain the fields on first touch WITHOUT reading as a new session (a
+    naive setdefault-then-increment lands on 2) and without re-alerting."""
+    state = {"seeded_at": T0, "known": {"listen:node:3000": {"exposed": False},
+                                        "conn:10.0.1.37:8081": {}}}
+    assert observe(state, [L()], [C()], T1) == []
+    for key in ("listen:node:3000", "conn:10.0.1.37:8081"):
+        entry = state["known"][key]
+        assert entry["first_seen"] == T1  # honestly "tracked since", not invented
+        assert entry["sessions"] == 1
+        assert entry["live"] is True
+    assert state["known"]["listen:node:3000"]["exposed"] is False  # preserved
+
+
+def test_legacy_entry_still_alerts_on_an_exposure_flip():
+    state = {"seeded_at": T0, "known": {"listen:node:3000": {"exposed": False}}}
+    events = observe(state, [L(localhost=False)], [], T1)
+    assert [e["kind"] for e in events] == ["now_exposed"]
+
+
+# --------------------------------------------------------------------------- #
+# Agent run ledger
+# --------------------------------------------------------------------------- #
+def test_run_ledger_seeds_from_the_first_sighting():
+    """Seeding records the run the row already knows about — real past data."""
+    state = agents_seeded([A(last_run="2026-08-02T10:00:00+00:00", last_exit=0)])
+    assert state["agent_runs"]["com.groceryhelper.recipes"] == [
+        {"ts": "2026-08-02T10:00:00+00:00", "exit": 0, "detected": T0}
+    ]
+
+
+def test_run_ledger_appends_a_new_run_newest_first():
+    state = agents_seeded([A(last_run="2026-08-02T10:00:00+00:00", last_exit=0)])
+    observe_agents(state, [A(last_run="2026-08-09T10:00:00+00:00", last_exit=1)], set(), T1)
+    log = state["agent_runs"]["com.groceryhelper.recipes"]
+    assert [r["ts"] for r in log] == ["2026-08-09T10:00:00+00:00", "2026-08-02T10:00:00+00:00"]
+    assert log[0]["exit"] == 1
+
+
+def test_run_ledger_defers_while_the_job_is_still_running():
+    """Mid-run, last_exit is still the PREVIOUS run's — pairing it with the new
+    timestamp would record a lie. One cycle later the pid is gone and it lands."""
+    state = agents_seeded([A(last_run="2026-08-02T10:00:00+00:00", last_exit=0)])
+    observe_agents(state, [A(last_run="2026-08-09T10:00:00+00:00", last_exit=0, pid=42)],
+                   set(), T1)
+    assert len(state["agent_runs"]["com.groceryhelper.recipes"]) == 1
+    observe_agents(state, [A(last_run="2026-08-09T10:00:00+00:00", last_exit=3)], set(), T1)
+    log = state["agent_runs"]["com.groceryhelper.recipes"]
+    assert len(log) == 2
+    assert log[0]["exit"] == 3
+
+
+def test_run_ledger_ignores_an_agent_with_no_run_yet():
+    state = agents_seeded([A(last_run=None)])
+    assert state.get("agent_runs", {}) == {}
+
+
+def test_run_ledger_is_capped_per_agent():
+    state = agents_seeded([A(last_run="run-0")])
+    for i in range(1, RUN_LEDGER_CAP + 20):
+        observe_agents(state, [A(last_run=f"run-{i}")], set(), T1)
+    log = state["agent_runs"]["com.groceryhelper.recipes"]
+    assert len(log) == RUN_LEDGER_CAP
+    assert log[0]["ts"] == f"run-{RUN_LEDGER_CAP + 19}"
+
+
+def test_run_ledger_is_pruned_when_the_agent_disappears():
+    state = agents_seeded([A(last_run="run-0")])
+    observe_agents(state, [], set(), T1)
+    assert "com.groceryhelper.recipes" not in state["agent_runs"]
+
+
+# --------------------------------------------------------------------------- #
+# Permanent JSONL archive
+# --------------------------------------------------------------------------- #
+def test_archive_appends_one_json_line_per_record(tmp_path):
+    p = tmp_path / "netwatch.log.jsonl"
+    state = seeded()
+    events = observe(state, [L(command="mystery", port=4444, localhost=False)], [], T1)
+    archive_records(events, [(T1, "launchd dashboard", "a body", True)], p)
+    lines = [json.loads(x) for x in p.read_text().splitlines()]
+    assert [x["t"] for x in lines] == ["event", "banner"]
+    assert lines[0]["kind"] == "new_exposed"
+    assert lines[0]["data"]["args"]        # the full command line rides along
+    assert lines[1]["ok"] is True
+    # APPEND, never overwrite — this file is the record the capped rings forget.
+    archive_records(events, [], p)
+    assert len(p.read_text().splitlines()) == 3
+
+
+def test_archive_writes_nothing_when_there_is_nothing(tmp_path):
+    p = tmp_path / "netwatch.log.jsonl"
+    archive_records([], [], p)
+    assert not p.exists()
+
+
+def test_archive_failure_never_breaks_the_cycle(tmp_path):
+    archive_records([{"ts": T1, "kind": "x"}], [], tmp_path / "no-such-dir" / "a.jsonl")
+
+
+def test_archive_size_is_zero_when_absent(tmp_path):
+    p = tmp_path / "netwatch.log.jsonl"
+    assert archive_size(p) == 0
+    archive_records([{"ts": T1, "kind": "x"}], [], p)
+    assert archive_size(p) > 0

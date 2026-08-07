@@ -61,6 +61,15 @@ deterministic and read-honest.
   tail) to expand a detail card: the full command line of a new listener plus whether it's
   *still* listening right now, the remote endpoint and resolved device name of a connection,
   or an agent's exit code, schedule, and a one-click jump to its log.
+- **It keeps what it sees.** Diffing alone throws away everything that *isn't* a change,
+  so the watcher also records: **sighting stats** per listener and device (first seen,
+  last seen, and how many separate times — so a card says "last seen listening 2h ago"
+  or "connected 14×", not just "gone"); a **run ledger** per launchd agent (every run it
+  detects, with the exit code, answering "has this job actually run every Sunday?"); a
+  **devices roster** in the History sheet listing every machine that ever connected to
+  your services, with the ports it touched; and an **append-only `netwatch.log.jsonl`**
+  archive, because the in-memory rings are capped and a busy week would otherwise erase
+  an earlier one. The archive is never trimmed — `grep`/`jq` it.
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 
@@ -114,8 +123,8 @@ out of TCC-protected folders (see Quickstart) and adjust the paths.
 | GET | `/api/apps/{slug}/log?lines=200` | tail a launched app's log |
 | GET | `/api/apps/discover` | scan the roots for launchable git projects (server-side inference) |
 | POST | `/api/apps/adopt` | add scanned candidates to apps.json by slug (append-only; never rewrites your edits) |
-| GET | `/api/watch` | network-watch state: active alerts, recent events, watcher health, failed-send count |
-| GET | `/api/watch/history` | full event ring + every banner the watcher sent (✓ sent / ✗ failed) |
+| GET | `/api/watch` | network-watch state: active alerts, recent events, watcher health, failed-send count, sighting stats + run ledger |
+| GET | `/api/watch/history` | full event ring + every banner the watcher sent (✓ sent / ✗ failed) + sightings, run ledger, archive size |
 | POST | `/api/watch/ack` | acknowledge an alert (`{"key": …}`) or always-allow a command (`{"command": …}`) — only server-minted active alerts are accepted |
 
 ## Launch your dev apps
