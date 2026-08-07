@@ -92,9 +92,29 @@ agents, tracks listening ports, and launches dev apps as transient agents. See
   without `-H` is exactly the case to catch. Per-key acks likewise don't survive a
   loopback→exposed flip (a new fact); only `acked_commands` silences a command entirely
   (Chrome binds `*` on a fresh random port per session, so per-key ack can't quiet it).
-- **`/api/ports` and the watcher share ONE scan path** (`_scan_ports()` in main.py).
-  Don't add a second listener-scan/attribution assembly — two paths answering "who
-  holds this port?" will drift, which is the moved-project bug all over again.
+- **`/api/ports` and the watcher share ONE scan path** (`_scan_ports()` in main.py,
+  now returns `(ports, specs, agents)`). Don't add a second listener-scan/attribution
+  assembly — two paths answering "who holds this port?" will drift, which is the
+  moved-project bug all over again. The agent list it returns also feeds the failure watch.
+- **Agent-failure alerts are EDGE-triggered and episode-based** (`observe_agents`). A
+  banner fires on the healthy **True→False** transition, not on seeing a failed agent
+  (first sighting seeds silently — you'd otherwise be re-told old history every restart).
+  `agent_failed` is in `_TRANSITION_KINDS`, so it **ignores a prior ack** — an ack ends
+  the current episode, the next failure is a new fact (a permanent per-agent mute would
+  have re-hidden the recipes job). Recovery (False→True) is log-only and clears the alert.
+  Watches only the user's OWN agents (`list_agents(include_vendor=True)` minus vendor);
+  `com.launchddash.app.*` are excluded by `list_agents` and deliberately unwatched (dev
+  servers exit nonzero constantly during iteration — that's noise, not a failure).
+- **Every dashboard-initiated agent stop MUST mark an expected-exit** (`_expect_exit`,
+  ~90s TTL) or it banners "agent X failed (exit 143)". Currently marked in `api_stop`,
+  `api_run` (kickstart -k kills first), `api_disable`. **Adding a new endpoint that kills
+  or unloads a real agent means adding `_expect_exit(label)` to it.** A manual
+  `launchctl kill` from a terminal still banners once — acceptable, and honest.
+- **The watcher RECORDS every banner it sends** (`record_notification`, the history
+  toggle + `/api/watch/history`), successes and failures both; a failed send bumps
+  `notify_failures`, surfaced in the meta line — a dead notification channel must announce
+  itself, same principle as `watch_errors`. `post_notification` runs OUTSIDE the state
+  lock (osascript can take seconds); recording re-takes the lock after.
 - **Dependency floors must stay Python-3.9-installable** (`run.sh` uses the system `python3`).
   `fastapi>=0.129` / `uvicorn>=0.40` / `pytest>=9` need ≥3.10 and are ignored in `dependabot.yml`;
   CI runs 3.12 and cannot catch this — dry-run any floor bump on the 3.9 venv. PRs also run the

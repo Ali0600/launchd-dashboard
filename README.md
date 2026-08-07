@@ -50,6 +50,14 @@ deterministic and read-honest.
   **Honest scope**: this is polling `lsof` as your user, not an IDS — it cannot see port
   scans, connections shorter than the poll interval, or outbound traffic. For outbound
   control or packet-level detection, use a firewall like Little Snitch or LuLu.
+- **Agent-failure alerts + notification history**: the same watcher also banners when one
+  of **your launchd agents fails** — a nonzero exit with nothing running — which is the
+  class of silent failure that let a weekly job die unnoticed for eleven days. A
+  dashboard-initiated stop/restart is never mistaken for a crash, and recovery clears the
+  alert on its own. Flip on **history** in the Network-watch header to see the full event
+  log *and* every banner the agent tried to send, each marked **sent** or **failed** — so
+  a broken notification channel (or a missed banner) is itself visible, not lost the moment
+  it scrolls off your screen.
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 
@@ -103,7 +111,8 @@ out of TCC-protected folders (see Quickstart) and adjust the paths.
 | GET | `/api/apps/{slug}/log?lines=200` | tail a launched app's log |
 | GET | `/api/apps/discover` | scan the roots for launchable git projects (server-side inference) |
 | POST | `/api/apps/adopt` | add scanned candidates to apps.json by slug (append-only; never rewrites your edits) |
-| GET | `/api/watch` | network-watch state: active alerts, recent events, watcher health |
+| GET | `/api/watch` | network-watch state: active alerts, recent events, watcher health, failed-send count |
+| GET | `/api/watch/history` | full event ring + every banner the watcher sent (✓ sent / ✗ failed) |
 | POST | `/api/watch/ack` | acknowledge an alert (`{"key": …}`) or always-allow a command (`{"command": …}`) — only server-minted active alerts are accepted |
 
 ## Launch your dev apps
@@ -196,3 +205,8 @@ live machine.
   remote endpoints (loopback / private / public, failing closed on unparseable input),
   posts injection-safe macOS notifications from a daemon context, and exposes an
   acknowledge workflow whose allow-lists only accept server-minted keys.
+- Extended the watcher into **service-health monitoring with an auditable delivery log**:
+  edge-triggered agent-failure alerts (True→False health transitions, exempting
+  operator-initiated stops via a short-TTL expected-exit set, auto-resolving on recovery)
+  plus a persisted **notification history** that records every banner as delivered or
+  failed — making the alerting channel itself observable rather than fire-and-forget.
