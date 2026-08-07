@@ -105,6 +105,25 @@ agents, tracks listening ports, and launches dev apps as transient agents. See
   Watches only the user's OWN agents (`list_agents(include_vendor=True)` minus vendor);
   `com.launchddash.app.*` are excluded by `list_agents` and deliberately unwatched (dev
   servers exit nonzero constantly during iteration — that's noise, not a failure).
+- **`known` entries are the ROSTER, not a seen-set — never drop one.** Each carries
+  `first_seen`/`last_seen`/`live`/`sessions` (+ `exposed` for listeners, `rhost`/`lport`/
+  `hostname` for conns, so nothing has to re-parse a colon-riddled IPv6 key). `sessions`
+  counts **episodes** — incremented only on a dead→live transition, so a dev server left
+  up all day is 1, not 2 880. Keys missing from a scan are marked `live: False` and kept:
+  that's what makes "last seen 2h ago" and the Devices roster possible.
+- **`_touch()` must tolerate a LEGACY entry shape forever** (`{}` / `{"exposed": bool}`
+  from before sighting stats). It backfills on first touch — `first_seen` then honestly
+  means "tracked since". A naive `setdefault`-then-increment lands on `sessions: 2` for
+  every pre-existing key; there is a test for exactly that.
+- **The run ledger records a run only when `last_run` moved AND no pid is live**
+  (`_record_run`). Mid-run, `last_exit` is still the PREVIOUS run's, so sampling then
+  pairs a fresh timestamp with a stale exit code. Deferring costs one cycle. KeepAlive
+  services (a pid forever) therefore keep only their seed record — correct, the ledger
+  is for scheduled/one-shot jobs.
+- **`netwatch.log.jsonl` is append-only and never rotated** (`archive_records`, one
+  writer: the watcher thread). It exists because the in-state rings are capped at 200;
+  at dozens of records a day it takes years to reach a megabyte. Failures print and are
+  swallowed — the archive must never break a watch cycle.
 - **Every dashboard-initiated agent stop MUST mark an expected-exit** (`_expect_exit`,
   ~90s TTL) or it banners "agent X failed (exit 143)". Currently marked in `api_stop`,
   `api_run` (kickstart -k kills first), `api_disable`. **Adding a new endpoint that kills

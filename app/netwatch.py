@@ -28,11 +28,16 @@ import ipaddress
 import json
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
 
 STATE_PATH = Path(__file__).resolve().parent.parent / "netwatch.json"
+# Append-only permanent record. The in-state rings are capped, so a busy week
+# eventually erases an earlier one; this file is never trimmed (at dozens of records
+# a day it takes years to reach a megabyte) and is meant for grep/jq.
+ARCHIVE_PATH = Path(__file__).resolve().parent.parent / "netwatch.log.jsonl"
 
 # One lock around every load→mutate→save cycle: the watcher thread and the ack
 # route both rewrite the state file, and an unlocked interleave loses the ack.
@@ -40,6 +45,7 @@ STATE_LOCK = threading.Lock()
 
 EVENT_RING = 200
 NOTIFY_RING = 200
+RUN_LEDGER_CAP = 50  # per agent
 
 # Kinds that alert (go to `active` + banner); everything else is log-only.
 _ALERT_SEVERITY = {
@@ -178,6 +184,39 @@ def _listener_kind(entry: dict, exposed: bool) -> Optional[str]:
     return "new_listener"
 
 
+def _touch(known: dict, key: str, now: str, **fields) -> dict:
+    """Record a SIGHTING of a known key and return its entry.
+
+    The watcher re-observes every listener and device each cycle and used to throw
+    that away, keeping only "have I seen this key". Now each entry carries
+    `first_seen` / `last_seen` / `live` / `sessions`, which is what lets a card say
+    "last seen 2h ago" or "connected 14×".
+
+    `sessions` counts EPISODES, not ticks: it increments only on a dead→live
+    transition, so a dev server left running all day is one session, not 2 880.
+
+    Legacy entries (pre-stats: `{}` or `{"exposed": bool}`) are backfilled in place
+    on first touch — `first_seen` then honestly means "tracked since". Any state
+    file written before this feature must keep working without a migration step.
+    """
+    entry = known.get(key)
+    if entry is None:
+        entry = known[key] = {"first_seen": now, "last_seen": now, "live": True, "sessions": 1}
+    elif "first_seen" not in entry:
+        entry.update({"first_seen": now, "last_seen": now, "live": True, "sessions": 1})
+    else:
+        if not entry.get("live"):
+            entry["sessions"] = int(entry.get("sessions") or 0) + 1
+        entry["live"] = True
+        entry["last_seen"] = now
+    for name, value in fields.items():
+        # Never overwrite a resolved value with an empty one (a hostname lookup that
+        # worked once shouldn't be erased by a later failure).
+        if value:
+            entry[name] = value
+    return entry
+
+
 def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
             now: str) -> list[dict]:
     """Diff one scan against the known set. Returns the cycle's new events."""
@@ -186,13 +225,16 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
     acked = set(state.get("acked", []))
     acked_commands = set(state.get("acked_commands", []))
     seeding = "seeded_at" not in state
+    seen: set = set()
 
     for e in listeners:
         key = listener_key(e)
         exposed = not e.get("localhost", False)
-        prev = known.get(key)
-        if prev is None:
-            known[key] = {"exposed": exposed}
+        seen.add(key)
+        is_new = key not in known
+        prev = _touch(known, key, now, command=e.get("command"), port=e.get("port"))
+        if is_new:
+            prev["exposed"] = exposed
             if seeding or key in acked or e["command"] in acked_commands:
                 continue
             kind = _listener_kind(e, exposed)
@@ -216,9 +258,14 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
 
     for c in inbound_conns:
         key = conn_key(c)
-        if key in known:
+        seen.add(key)
+        is_new = key not in known
+        # rhost/lport/command are stored rather than re-parsed from the key: an IPv6
+        # remote is full of colons, so splitting `conn:<host>:<port>` is a trap.
+        _touch(known, key, now, hostname=c.get("hostname"), rhost=c.get("rhost"),
+               lport=c.get("lport"), command=c.get("command"))
+        if not is_new:
             continue
-        known[key] = {}
         if seeding or key in acked or c["command"] in acked_commands:
             continue
         kind = "lan_connect" if c["remote_class"] == "lan" else "public_connect"
@@ -229,6 +276,13 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
               summary=f"{who} {named} connected to :{c['lport']} ({c['command']})",
               detail=f"{c['rhost']}:{c['rport']} → :{c['lport']} · pid {c['pid']}",
               data=_conn_data(c))
+
+    # Anything not in this scan is no longer live. The entry is NEVER dropped — it's
+    # the roster ("this device has connected 14× since Aug 4") and the reason a card
+    # can say "last seen listening 2h ago" instead of just "not listening anymore".
+    for key, entry in known.items():
+        if key not in seen and entry.get("live"):
+            entry["live"] = False
 
     if seeding:
         state["seeded_at"] = now
@@ -274,6 +328,34 @@ def _agent_data(a: dict) -> dict:
     }
 
 
+def _record_run(state: dict, a: dict, now: str) -> None:
+    """Keep a per-agent ledger of the runs we detect.
+
+    Every cycle already observes each agent's `last_run` (its log's mtime) and
+    `last_exit` and used to discard both — so "has the recipes job actually run every
+    Sunday?" was unanswerable, which is the exact question its 11-day silent death begs.
+
+    A run is recorded when `last_run` moves AND no pid is live: while a job is still
+    running, `last_exit` is the PREVIOUS run's, so sampling mid-flight would pair a new
+    timestamp with a stale exit code. Deferring to the next cycle costs 30s and is
+    correct. Always-on services (KeepAlive, a pid forever) therefore keep only their
+    seed record — right, since the ledger exists for scheduled and one-shot jobs.
+    """
+    last_run = a.get("last_run")
+    if not last_run:
+        return
+    runs = state.setdefault("agent_runs", {})
+    label = a["label"]
+    log = runs.get(label)
+    record = {"ts": last_run, "exit": a.get("last_exit"), "detected": now}
+    if log is None:
+        runs[label] = [record]  # first sighting: seed from real past data, no event
+        return
+    if (log and log[0].get("ts") == last_run) or a.get("pid") is not None:
+        return
+    runs[label] = ([record] + log)[:RUN_LEDGER_CAP]
+
+
 def observe_agents(state: dict, agents: list[dict], expected: "set[str]",
                    now: str) -> list[dict]:
     """Diff launchd agent health against the last scan. A user agent going
@@ -291,6 +373,7 @@ def observe_agents(state: dict, agents: list[dict], expected: "set[str]",
     for a in agents:
         label = a["label"]
         present.add(label)
+        _record_run(state, a, now)
         healthy = bool(a.get("healthy"))
         prev = health.get(label)
         health[label] = healthy
@@ -312,8 +395,10 @@ def observe_agents(state: dict, agents: list[dict], expected: "set[str]",
                   data=_agent_data(a))
 
     # Drop labels that no longer exist (removed app / deleted plist) so re-adding re-seeds.
+    runs = state.setdefault("agent_runs", {})
     for gone in [k for k in health if k not in present]:
         health.pop(gone)
+        runs.pop(gone, None)
         (state.get("active") or {}).pop(f"agent:{gone}", None)
 
     if seeding_agents:
@@ -459,3 +544,29 @@ def save_state(state: dict, path: Path = STATE_PATH) -> None:
         os.replace(tmp, path)
     except OSError:
         pass
+
+
+def archive_records(events: list[dict], posted: list, path: Path = ARCHIVE_PATH) -> None:
+    """Append this cycle's events and banners to the permanent JSONL log.
+
+    One JSON object per line, `t` naming the record type. Best-effort by design: a
+    failed append must never break a watch cycle, and there is exactly one writer
+    (the watcher thread), so a plain append needs no locking.
+    """
+    lines = [json.dumps({"t": "event", **ev}) for ev in events]
+    lines += [json.dumps({"t": "banner", "ts": ts, "title": title, "body": body, "ok": ok})
+              for ts, title, body, ok in posted]
+    if not lines:
+        return
+    try:
+        with open(path, "a") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        print(f"launchddash: could not append to the netwatch archive: {exc!r}", file=sys.stderr)
+
+
+def archive_size(path: Path = ARCHIVE_PATH) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
