@@ -150,17 +150,19 @@ def conn_key(conn: dict) -> str:
 # Observation (pure; mutates the passed state dict, returns this cycle's events)
 # --------------------------------------------------------------------------- #
 def _emit(state: dict, events: list, *, kind: str, key: str, summary: str,
-          command: str, now: str, detail: str = "") -> None:
+          command: str, now: str, detail: str = "", data: Optional[dict] = None) -> None:
     severity = _ALERT_SEVERITY.get(kind, "info")
     banner = kind in _ALERT_SEVERITY
+    # `data` is the structured detail the click-to-expand card reads (full command line,
+    # addresses, remote endpoint, exit code …). `detail` stays as the compact row line.
     ev = {"ts": now, "kind": kind, "key": key, "summary": summary,
-          "severity": severity, "banner": banner, "detail": detail}
+          "severity": severity, "banner": banner, "detail": detail, "data": data or {}}
     events.append(ev)
     state["events"] = ([ev] + state.get("events", []))[:EVENT_RING]
     if banner:
         state.setdefault("active", {})[key] = {
             "ts": now, "kind": kind, "summary": summary,
-            "severity": severity, "command": command, "detail": detail,
+            "severity": severity, "command": command, "detail": detail, "data": data or {},
         }
 
 
@@ -200,7 +202,7 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
             reach = "exposed to the LAN" if exposed else "on loopback"
             _emit(state, events, kind=kind, key=key, command=e["command"], now=now,
                   summary=f"{e['command']} started listening on :{e['port']} {reach}{where}",
-                  detail=_listener_detail(e))
+                  detail=_listener_detail(e), data=_listener_data(e))
         elif exposed and not prev.get("exposed"):
             prev["exposed"] = True
             # A previously ACKED key still alerts here: the ack blessed a loopback
@@ -210,7 +212,7 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
                 continue
             _emit(state, events, kind="now_exposed", key=key, command=e["command"], now=now,
                   summary=f"{e['command']} on :{e['port']} flipped from loopback to LAN-exposed",
-                  detail=_listener_detail(e))
+                  detail=_listener_detail(e), data=_listener_data(e))
 
     for c in inbound_conns:
         key = conn_key(c)
@@ -221,9 +223,12 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
             continue
         kind = "lan_connect" if c["remote_class"] == "lan" else "public_connect"
         who = "device" if c["remote_class"] == "lan" else "PUBLIC address"
+        # A resolved device name (dscacheutil, best-effort) is folded in when present.
+        named = f"{c['hostname']} ({c['rhost']})" if c.get("hostname") else c["rhost"]
         _emit(state, events, kind=kind, key=key, command=c["command"], now=now,
-              summary=f"{who} {c['rhost']} connected to :{c['lport']} ({c['command']})",
-              detail=f"{c['rhost']}:{c['rport']} → :{c['lport']} · pid {c['pid']}")
+              summary=f"{who} {named} connected to :{c['lport']} ({c['command']})",
+              detail=f"{c['rhost']}:{c['rport']} → :{c['lport']} · pid {c['pid']}",
+              data=_conn_data(c))
 
     if seeding:
         state["seeded_at"] = now
@@ -238,6 +243,35 @@ def _listener_detail(e: dict) -> str:
     if e.get("agent"):
         bits.append(e["agent"])
     return " · ".join(b for b in bits if b)
+
+
+def _listener_data(e: dict) -> dict:
+    """Structured fields for a listener event's expand card. `args` (the full command
+    line) is the headline — it's what actually identifies a 'mystery listener'."""
+    return {
+        "type": "listener",
+        "command": e.get("command"), "port": e.get("port"), "pid": e.get("pid"),
+        "addresses": e.get("addresses") or [], "project": e.get("project"),
+        "cwd": e.get("cwd"), "agent": e.get("agent"), "args": e.get("args") or "",
+    }
+
+
+def _conn_data(c: dict) -> dict:
+    return {
+        "type": "conn",
+        "command": c.get("command"), "pid": c.get("pid"), "lport": c.get("lport"),
+        "rhost": c.get("rhost"), "rport": c.get("rport"),
+        "remote_class": c.get("remote_class"), "hostname": c.get("hostname") or "",
+    }
+
+
+def _agent_data(a: dict) -> dict:
+    return {
+        "type": "agent",
+        "label": a.get("label"), "last_exit": a.get("last_exit"),
+        "status": a.get("status"), "schedule": a.get("schedule"),
+        "program": a.get("program"),
+    }
 
 
 def observe_agents(state: dict, agents: list[dict], expected: "set[str]",
@@ -269,11 +303,13 @@ def observe_agents(state: dict, agents: list[dict], expected: "set[str]",
             _emit(state, events, kind="agent_failed", key=f"agent:{label}",
                   command=label, now=now,
                   summary=f"agent {label} failed{exit_note}",
-                  detail=f"status {a.get('status', '?')} · {a.get('schedule', '')}".strip(" ·"))
+                  detail=f"status {a.get('status', '?')} · {a.get('schedule', '')}".strip(" ·"),
+                  data=_agent_data(a))
         else:  # False -> True: recovered — resolve the episode
             (state.get("active") or {}).pop(f"agent:{label}", None)
             _emit(state, events, kind="agent_recovered", key=f"agent:{label}",
-                  command=label, now=now, summary=f"agent {label} recovered")
+                  command=label, now=now, summary=f"agent {label} recovered",
+                  data=_agent_data(a))
 
     # Drop labels that no longer exist (removed app / deleted plist) so re-adding re-seeds.
     for gone in [k for k in health if k not in present]:
@@ -362,6 +398,36 @@ def established() -> list[dict]:
     except (OSError, subprocess.TimeoutExpired):
         return []
     return parse_lsof_connections(res.stdout)
+
+
+def parse_dscacheutil_name(output: str) -> str:
+    """Pull the hostname from `dscacheutil -q host -a ip_address <ip>` output.
+    A resolvable IP prints a `name: speedport.ip` line; an unknown IP prints
+    nothing (verified live 2026-08-07). Returns "" when there's no name."""
+    for line in output.splitlines():
+        if line.startswith("name:"):
+            return line[len("name:"):].strip()
+    return ""
+
+
+_HOSTNAME_CACHE: dict = {}
+
+
+def resolve_hostname(ip: str) -> str:
+    """Best-effort reverse name for a LAN/public IP (device identification in a
+    connection alert). Cached in-memory; never raises; "" when unresolved."""
+    if ip in _HOSTNAME_CACHE:
+        return _HOSTNAME_CACHE[ip]
+    try:
+        res = subprocess.run(
+            ["dscacheutil", "-q", "host", "-a", "ip_address", ip],
+            capture_output=True, text=True, timeout=2,
+        )
+        name = parse_dscacheutil_name(res.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        name = ""
+    _HOSTNAME_CACHE[ip] = name
+    return name
 
 
 def load_state(path: Path = STATE_PATH) -> dict:

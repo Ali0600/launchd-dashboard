@@ -57,7 +57,10 @@ deterministic and read-honest.
   alert on its own. The **Network History** button in the page header opens a sheet with
   the full event log *and* every banner the agent tried to send, each marked **sent** or
   **failed** — so a broken notification channel (or a missed banner) is itself visible, not
-  lost the moment it scrolls off your screen.
+  lost the moment it scrolls off your screen. **Click any event** (in the sheet or the live
+  tail) to expand a detail card: the full command line of a new listener plus whether it's
+  *still* listening right now, the remote endpoint and resolved device name of a connection,
+  or an agent's exit code, schedule, and a one-click jump to its log.
 - **Self-hostable**: ships a launchd plist template so the dashboard runs as *its own*
   agent and appears in its own list.
 

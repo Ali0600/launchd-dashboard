@@ -16,6 +16,7 @@ from app.netwatch import (
     notify_script,
     observe,
     observe_agents,
+    parse_dscacheutil_name,
     parse_lsof_connections,
     record_notification,
     save_state,
@@ -25,20 +26,24 @@ T0 = "2026-08-04T10:00:00+00:00"
 T1 = "2026-08-04T10:00:30+00:00"
 
 
-def L(command="node", port=3000, localhost=True, system=False, agent=None, project=None):
+def L(command="node", port=3000, localhost=True, system=False, agent=None, project=None,
+      args="node /Users/x/app/server.js"):
     """A ports.list_ports entry."""
     return {
         "port": port, "pid": 1, "command": command,
         "addresses": ["127.0.0.1"] if localhost else ["*"],
         "localhost": localhost, "cwd": None, "project": project,
-        "args": "", "system": system, "agent": agent,
+        "args": args, "system": system, "agent": agent,
     }
 
 
-def C(rhost="10.0.1.37", lport=8081, command="node", remote_class="lan"):
-    """An inbound() row (already classified)."""
-    return {"pid": 2, "command": command, "lhost": "10.0.1.5", "lport": lport,
-            "rhost": rhost, "rport": 52911, "remote_class": remote_class}
+def C(rhost="10.0.1.37", lport=8081, command="node", remote_class="lan", hostname=None):
+    """An inbound() row (already classified; hostname enriched by the watcher)."""
+    c = {"pid": 2, "command": command, "lhost": "10.0.1.5", "lport": lport,
+         "rhost": rhost, "rport": 52911, "remote_class": remote_class}
+    if hostname is not None:
+        c["hostname"] = hostname
+    return c
 
 
 def seeded(listeners=(), conns=()):
@@ -259,6 +264,57 @@ def test_listener_alert_carries_a_detail_line():
     ev = state["events"][0]
     assert "pid 1" in ev["detail"] and "*" in ev["detail"] and "~/x" in ev["detail"]
     assert state["active"]["listen:node:4444"]["detail"] == ev["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# Structured `data` for the click-to-expand card
+# --------------------------------------------------------------------------- #
+def test_listener_event_data_carries_the_full_command_line():
+    state = seeded()
+    observe(state, [L(command="mystery", port=4444, args="/bin/mystery --serve :4444")], [], T1)
+    d = state["events"][0]["data"]
+    assert d["type"] == "listener"
+    assert d["args"] == "/bin/mystery --serve :4444"  # the headline field
+    assert d["pid"] == 1 and d["port"] == 4444 and d["addresses"] == ["127.0.0.1"]
+    # active entry carries the same structured data (the card also opens from active).
+    assert state["active"]["listen:mystery:4444"]["data"]["args"] == d["args"]
+
+
+def test_conn_event_data_carries_the_remote_endpoint():
+    state = seeded()
+    observe(state, [], [C(rhost="10.0.1.9", lport=8081, remote_class="lan")], T1)
+    d = state["events"][0]["data"]
+    assert d["type"] == "conn"
+    assert d["rhost"] == "10.0.1.9" and d["rport"] == 52911 and d["lport"] == 8081
+    assert d["remote_class"] == "lan"
+
+
+def test_agent_event_data_carries_exit_and_schedule():
+    state = agents_seeded([A(healthy=True)])
+    observe_agents(state, [A(healthy=False, last_exit=256, status="idle",
+                             schedule="Sun 10:00")], set(), T1)
+    d = state["events"][0]["data"]
+    assert d["type"] == "agent"
+    assert d["last_exit"] == 256 and d["status"] == "idle" and d["schedule"] == "Sun 10:00"
+
+
+def test_hostname_is_folded_into_a_conn_summary_when_present():
+    state = seeded()
+    observe(state, [], [C(rhost="10.0.1.9", hostname="Alis-iPhone")], T1)
+    ev = state["events"][0]
+    assert "Alis-iPhone (10.0.1.9)" in ev["summary"]
+    assert ev["data"]["hostname"] == "Alis-iPhone"
+    # Absent hostname → summary unchanged (old rows / unresolved IPs).
+    state2 = seeded()
+    observe(state2, [], [C(rhost="10.0.1.9")], T1)
+    assert "10.0.1.9 connected" in state2["events"][0]["summary"]
+    assert state2["events"][0]["data"]["hostname"] == ""
+
+
+def test_parse_dscacheutil_name():
+    out = "name: speedport.ip\nalias: 1.2.168.192.in-addr.arpa\nip_address: 192.168.2.1\n"
+    assert parse_dscacheutil_name(out) == "speedport.ip"
+    assert parse_dscacheutil_name("") == ""  # unknown IP prints nothing (verified live)
 
 
 # --------------------------------------------------------------------------- #

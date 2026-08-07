@@ -67,6 +67,10 @@ def _watch_once() -> None:
     failures, then post (and record) every banner."""
     scanned, _specs, agents = _scan_ports()
     inb = netwatch.inbound(netwatch.established(), {e["port"] for e in scanned})
+    # Best-effort device name per inbound remote — only for rows about to alert (one per
+    # device+port), so the dscacheutil lookup runs rarely. Cached in netwatch.
+    for c in inb:
+        c["hostname"] = netwatch.resolve_hostname(c["rhost"])
     # Only the user's OWN agents — vendor jobs churn and aren't the user's to fix.
     own_agents = [a for a in agents if not a.get("vendor")]
     expected = _expected_now()
@@ -400,6 +404,13 @@ PAGE = """<!DOCTYPE html>
                justify-content: space-between; gap: 12px; padding: 20px 0 10px; border-bottom: 0.5px solid #272b34; }
   .sheethead .h { font-weight: 600; font-size: 16px; }
   .sheethead .m { font-size: 12px; color: #8b909c; margin-top: 3px; }
+  /* Click-to-expand event card — an inline detail panel under the clicked event row.
+     Expansion state is re-derived on every render (survives the 30s poll). */
+  .evrow:hover { background: #171a21; }
+  .evcard { background: #0c0e12; padding: 10px 16px 14px 36px; font-size: 12px; }
+  .cl { display: flex; gap: 10px; padding: 2px 0; }
+  .cl .ck { color: #8b909c; width: 96px; flex: none; }
+  .cl .cv { color: #cfd3db; min-width: 0; overflow-wrap: anywhere; }
 </style></head>
 <body><div class="wrap">
   <header>
@@ -818,9 +829,72 @@ function checkPort() {
 const esc = (s) => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+// ---- Expandable event rows (shared by the watch tail and the History sheet) ----
+// Clicking a row toggles membership in this Set; because the row TEMPLATE consults it,
+// an open card is re-rendered open on the next 30s poll (the parked-panel lesson, one
+// level up). `args` in the listener card is the most attacker-shaped string here — esc().
+const expandedEvents = new Set();
+const eventId = (e) => `${e.ts}|${e.kind}|${e.key}`;
+
+function cardLine(k, v) {
+  if (v === null || v === undefined || v === "") return "";
+  return `<div class="cl"><span class="ck">${esc(k)}</span><span class="cv">${esc(v)}</span></div>`;
+}
+
+function evCard(e) {
+  const d = e.data || {};
+  let lines = cardLine("when", new Date(e.ts).toLocaleString())
+    + cardLine("kind", `${e.kind} · ${e.severity} · ${e.banner ? "bannered" : "log only"}`)
+    + cardLine("key", e.key);
+  let logBtn = "";
+  if (d.type === "listener") {
+    lines += cardLine("command", d.command) + cardLine("pid", d.pid)
+      + cardLine("addresses", (d.addresses || []).join(", "))
+      + cardLine("project", d.project || d.cwd) + cardLine("agent", d.agent);
+    // Live cross-check against the already-polled ports — no extra request.
+    const live = portData.find(p => p.kind !== "claimed" && p.command === d.command && p.port === d.port);
+    lines += cardLine("now", live ? `still listening (pid ${live.pid})` : "not listening anymore");
+    if (d.args) lines += `<div class="cl"><span class="ck">command line</span><span class="cv mono">${esc(d.args)}</span></div>`;
+  } else if (d.type === "conn") {
+    lines += cardLine("remote", `${d.rhost}:${d.rport}`) + cardLine("device", d.hostname || "—")
+      + cardLine("local port", `:${d.lport}`) + cardLine("network", d.remote_class)
+      + cardLine("command", `${d.command} (pid ${d.pid})`);
+  } else if (d.type === "agent") {
+    lines += cardLine("exit code", d.last_exit == null ? "—" : d.last_exit)
+      + cardLine("status", d.status) + cardLine("schedule", d.schedule)
+      + cardLine("program", d.program);
+    logBtn = `<div style="margin-top:8px"><button data-agentlog="${esc(d.label || "")}">≣ View log</button></div>`;
+  }
+  return `<div class="evcard">${lines}${logBtn}</div>`;
+}
+
+function evListHTML(events, muted) {
+  return events.map(e => {
+    const id = eventId(e), open = expandedEvents.has(id);
+    const dot = e.banner ? (e.severity === "bad" ? "bad" : "warn") : "off";
+    return `<div class="row evrow" data-ev="${esc(id)}" style="${muted ? "opacity:.55;" : ""}cursor:pointer">
+        <span class="dot ${dot}"></span>
+        <div class="meta"><div class="sub">${esc(e.summary)}${e.detail ? " · " + esc(e.detail) : ""} · ${rel(e.ts)}</div></div>
+        <span class="muted" style="font-size:11px">${open ? "▾" : "▸"}</span>
+      </div>` + (open ? evCard(e) : "");
+  }).join("");
+}
+
+// Toggle expansion and re-render from CACHED data (never refetch on a click).
+function toggleEvent(container, id, rerender) {
+  expandedEvents.has(id) ? expandedEvents.delete(id) : expandedEvents.add(id);
+  rerender();
+}
+
+let lastWatch = null;
 async function loadWatch() {
   const r = await fetch("/api/watch");
-  const w = await r.json();
+  lastWatch = await r.json();
+  renderWatch();
+}
+function renderWatch() {
+  const w = lastWatch;
+  if (!w) return;
   const n = w.active.length;
   document.title = n ? `(${n}!) launchd dashboard` : "launchd dashboard";
   $("watchmeta").textContent =
@@ -836,13 +910,10 @@ async function loadWatch() {
       <span class="pill ${a.severity === "bad" ? "bad" : "warn"}">${a.severity === "bad" ? "alert" : "notice"}</span>
       <button data-ack="${esc(a.key)}" title="OK — never alert for this again">OK</button>
       ${a.key.startsWith("listen:") ? `<button data-ackcmd="${esc(a.command)}" title="Always allow ${esc(a.command)} on any port">allow app</button>` : ""}
-    </div>`);
+    </div>`).join("");
   // The live section shows only the recent tail — the full ring lives in the History sheet.
-  const recent = w.events.slice(0, 10).map(e => `<div class="row" style="opacity:.55">
-      <span class="dot ${e.banner ? (e.severity === "bad" ? "bad" : "warn") : "off"}"></span>
-      <div class="meta"><div class="sub">${esc(e.summary)}${e.detail ? " · " + esc(e.detail) : ""} · ${rel(e.ts)}</div></div>
-    </div>`);
-  $("watchlist").innerHTML = active.concat(recent).join("") ||
+  const recent = evListHTML(w.events.slice(0, 10), true);
+  $("watchlist").innerHTML = active + recent ||
     `<div class="empty">Nothing new — fresh listeners, LAN exposure, inbound connections, and agent failures will show up here.</div>`;
 }
 
@@ -858,21 +929,21 @@ function openHistory() { historyOpen = true; $("sheetback").classList.add("open"
 function closeHistory() { historyOpen = false; $("sheetback").classList.remove("open");
   $("histsheet").classList.remove("open"); $("histsheet").setAttribute("aria-hidden", "true"); }
 
+let lastHistory = null;
 async function loadHistory() {
   const r = await fetch("/api/watch/history");
-  const h = await r.json();
+  lastHistory = await r.json();
+  renderHistory();
+}
+function renderHistory() {
+  const h = lastHistory;
+  if (!h) return;
   const evs = h.events || [], notes = h.notifications || [];
   $("histmeta").textContent =
     (h.seeded_at ? `watching since ${new Date(h.seeded_at).toLocaleDateString()} · ` : "") +
     `${evs.length} events · ${notes.length} banners` +
     (h.notify_failures ? ` · ✗ ${h.notify_failures} failed sends` : "");
-  $("histevents").innerHTML = evs.map(e => `<div class="row">
-      <span class="dot ${e.banner ? (e.severity === "bad" ? "bad" : "warn") : "off"}"></span>
-      <div class="meta">
-        <div class="sub">${esc(e.summary)}${e.detail ? " · " + esc(e.detail) : ""}</div>
-        <div class="sub muted">${esc(e.kind)} · ${rel(e.ts)}</div>
-      </div>
-    </div>`).join("") || `<div class="empty">No events yet.</div>`;
+  $("histevents").innerHTML = evListHTML(evs, false) || `<div class="empty">No events yet.</div>`;
   $("histnotifs").innerHTML = notes.map(nt => `<div class="row">
       <span class="pill ${nt.ok ? "ok" : "bad"}">${nt.ok ? "sent" : "failed"}</span>
       <div class="meta">
@@ -884,19 +955,34 @@ async function loadHistory() {
 
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && historyOpen) closeHistory(); });
 
-// Delegated: the handler lives on the container, which innerHTML never replaces.
+// An agent event's "View log" reuses the existing log panel (parks under the agent row).
+function openAgentLog(label) { if (historyOpen) closeHistory(); showLog(label); }
+
+// Delegated: the handler lives on the container, which innerHTML never replaces. Order:
+// ack buttons → View-log button → event-row toggle (re-renders from cache, no refetch).
 $("watchlist").onclick = async (ev) => {
-  const b = ev.target.closest("button[data-ack],button[data-ackcmd]");
-  if (!b) return;
-  const body = b.dataset.ack ? { key: b.dataset.ack } : { command: b.dataset.ackcmd };
-  const r = await fetch("/api/watch/ack", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const j = await r.json();
-  toast(j.ok ? j.detail : `ack failed: ${j.detail}`);
-  loadWatch();
+  const ackBtn = ev.target.closest("button[data-ack],button[data-ackcmd]");
+  if (ackBtn) {
+    const body = ackBtn.dataset.ack ? { key: ackBtn.dataset.ack } : { command: ackBtn.dataset.ackcmd };
+    const r = await fetch("/api/watch/ack", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    toast(j.ok ? j.detail : `ack failed: ${j.detail}`);
+    loadWatch();
+    return;
+  }
+  const logBtn = ev.target.closest("button[data-agentlog]");
+  if (logBtn) { openAgentLog(logBtn.dataset.agentlog); return; }
+  const row = ev.target.closest(".evrow[data-ev]");
+  if (row) toggleEvent("watchlist", row.dataset.ev, renderWatch);
+};
+
+$("histevents").onclick = (ev) => {
+  const logBtn = ev.target.closest("button[data-agentlog]");
+  if (logBtn) { openAgentLog(logBtn.dataset.agentlog); return; }
+  const row = ev.target.closest(".evrow[data-ev]");
+  if (row) toggleEvent("histevents", row.dataset.ev, renderHistory);
 };
 
 function loadAll() { load(); loadApps(); loadPorts(); loadWatch(); if (historyOpen) loadHistory(); }

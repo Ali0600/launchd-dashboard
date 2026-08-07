@@ -157,13 +157,13 @@ def test_history_sheet_fetches_on_demand_only():
     open, so a closed sheet costs zero extra requests."""
     js = script()
     assert js.count('fetch("/api/watch/history")') == 1, "history fetched from exactly one place (the sheet loader)"
-    hist = js.split("async function loadHistory", 1)[1]
-    assert 'fetch("/api/watch/history")' in hist
+    loader = js.split("async function loadHistory", 1)[1].split("function renderHistory", 1)[0]
+    assert 'fetch("/api/watch/history")' in loader
     loadall = js.split("function loadAll", 1)[1].split("\n", 1)[0]
     assert "if (historyOpen) loadHistory()" in loadall  # poll re-fetch gated on open
-    # every interpolation in the sheet embeds process-named text → esc()
-    assert "esc(e.summary)" in hist and "esc(e.detail)" in hist
-    assert "esc(nt.body)" in hist and "esc(nt.title)" in hist
+    # the sent-banner body/title (process-named text) is esc()'d in the sheet renderer
+    render = js.split("function renderHistory", 1)[1]
+    assert "esc(nt.body)" in render and "esc(nt.title)" in render
 
 
 def test_history_sheet_closes_by_backdrop_and_escape():
@@ -175,9 +175,40 @@ def test_history_sheet_closes_by_backdrop_and_escape():
 
 def test_watch_renders_detail_and_failed_send_count():
     js = script()
-    watch = js.split("async function loadWatch", 1)[1].split("// ---- Network History", 1)[0]
-    assert "esc(a.detail)" in watch and "esc(e.detail)" in watch
-    assert "failed sends" in watch  # notify_failures surfaced in the meta line
+    render = js.split("function renderWatch", 1)[1].split("async function loadHistory", 1)[0]
+    assert "esc(a.detail)" in render
+    assert "failed sends" in render  # notify_failures surfaced in the meta line
+    ev = js.split("function evListHTML", 1)[1].split("function toggleEvent", 1)[0]
+    assert "esc(e.detail)" in ev  # the recent-tail rows escape their detail too
+
+
+def test_event_rows_expand_on_click_from_cache_not_a_refetch():
+    """Clicking an event toggles an inline card, re-rendered from the LAST fetch (no
+    network on click). The row TEMPLATE consults expandedEvents so an open card survives
+    the 30s re-render — the parked-panel lesson one level up."""
+    js = script()
+    # the toggle handler must not fetch — it re-renders from cache
+    toggle = js.split("function toggleEvent", 1)[1].split("\n}", 1)[0]
+    assert "fetch(" not in toggle, "a click must never trigger a request"
+    assert "rerender()" in toggle
+    # the row template gates the card on expandedEvents (survives re-render)
+    evlist = js.split("function evListHTML", 1)[1].split("function toggleEvent", 1)[0]
+    assert "expandedEvents.has(id)" in evlist
+    assert 'data-ev="${esc(id)}"' in evlist  # id rides a data-attribute, not inline JS
+    # both containers wire the delegated toggle
+    assert '$("watchlist").onclick' in js and '$("histevents").onclick' in js
+
+
+def test_event_card_escapes_the_command_line_and_offers_agent_log():
+    """The listener card shows the full command line — the most attacker-shaped string in
+    the app — so it must be esc()'d; agent cards get a delegated View-log button."""
+    js = script()
+    card = js.split("function evCard", 1)[1].split("function evListHTML", 1)[0]
+    assert "esc(d.args)" in card, "the command line must be escaped"
+    assert "portData.find" in card, "listener card cross-checks the live port list"
+    assert 'data-agentlog="${esc(d.label' in card  # log button rides a data-attribute
+    # View log closes the sheet first, then reuses the existing log panel
+    assert "if (historyOpen) closeHistory(); showLog(label)" in js.replace("\n", " ")
 
 
 def test_rows_carry_the_log_key_the_panel_is_placed_by():
