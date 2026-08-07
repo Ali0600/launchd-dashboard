@@ -121,6 +121,18 @@ agents, tracks listening ports, and launches dev apps as transient agents. See
   is fetched from ONE place (`loadHistory`), and the 30s poll re-fetches it ONLY while the
   sheet is open (`if (historyOpen)`), so a closed sheet costs zero requests. Every sheet
   interpolation goes through `esc()` (bodies/summaries embed process command names).
+- **Events carry a structured `data` dict** (`_emit`'s `data` arg → `_listener_data` /
+  `_conn_data` / `_agent_data`) beside the compact `detail` string — that's what the
+  click-to-expand card reads (full command line `args`, addresses, remote endpoint, exit
+  code…). **Old persisted events have no `data`** — every consumer must tolerate `{}`.
+  The listener card's headline is `args`, the most attacker-shaped string in the app —
+  `esc()` it. Card expansion state lives in a JS `expandedEvents` Set that the row
+  TEMPLATE (`evListHTML`) consults, so an open card survives the 30s re-render; a click
+  toggles the Set and re-renders from the CACHED fetch (`lastWatch`/`lastHistory`) — never
+  refetches. The listener card cross-checks the already-polled `portData` for "still
+  listening now". `resolve_hostname` (dscacheutil, best-effort, cached, `""` on miss —
+  output shape verified live: a `name:` line when resolvable, nothing when not) names LAN
+  devices; only inbound rows about to alert are resolved, so it runs rarely.
 - **Dependency floors must stay Python-3.9-installable** (`run.sh` uses the system `python3`).
   `fastapi>=0.129` / `uvicorn>=0.40` / `pytest>=9` need ≥3.10 and are ignored in `dependabot.yml`;
   CI runs 3.12 and cannot catch this — dry-run any floor bump on the 3.9 venv. PRs also run the
