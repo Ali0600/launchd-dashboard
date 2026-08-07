@@ -3,7 +3,9 @@
 import json
 
 from app.netwatch import (
+    _TRANSITION_KINDS,
     EVENT_RING,
+    NOTIFY_RING,
     ack,
     ack_command,
     classify_remote,
@@ -13,7 +15,9 @@ from app.netwatch import (
     load_state,
     notify_script,
     observe,
+    observe_agents,
     parse_lsof_connections,
+    record_notification,
     save_state,
 )
 
@@ -40,6 +44,19 @@ def C(rhost="10.0.1.37", lport=8081, command="node", remote_class="lan"):
 def seeded(listeners=(), conns=()):
     state = {}
     assert observe(state, list(listeners), list(conns), T0) == []
+    return state
+
+
+def A(label="com.groceryhelper.recipes", healthy=True, last_exit=0, status="idle",
+      schedule="Sun 10:00"):
+    """A launchd.list_agents() row (subset the watcher reads)."""
+    return {"label": label, "healthy": healthy, "last_exit": last_exit,
+            "status": status, "schedule": schedule, "vendor": False}
+
+
+def agents_seeded(agents=()):
+    state = {}
+    assert observe_agents(state, list(agents), set(), T0) == []
     return state
 
 
@@ -230,6 +247,102 @@ def test_event_ring_is_capped():
     assert len(state["events"]) == EVENT_RING
     # Newest first: the highest port is at the head.
     assert f":{10000 + EVENT_RING + 49}" in state["events"][0]["summary"]
+
+
+# --------------------------------------------------------------------------- #
+# Listener detail enrichment
+# --------------------------------------------------------------------------- #
+def test_listener_alert_carries_a_detail_line():
+    state = seeded()
+    # Exposed + attributed → banners (exposure outranks attribution), so it lands in active.
+    observe(state, [L(command="node", port=4444, localhost=False, project="~/x")], [], T1)
+    ev = state["events"][0]
+    assert "pid 1" in ev["detail"] and "*" in ev["detail"] and "~/x" in ev["detail"]
+    assert state["active"]["listen:node:4444"]["detail"] == ev["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# observe_agents(): launchd agent failure watch
+# --------------------------------------------------------------------------- #
+def test_agent_seed_is_silent_even_if_already_failed():
+    """A pre-existing failure must not banner on first sight — you'd be told about
+    history you can't act on, every restart."""
+    state = {}
+    assert observe_agents(state, [A(healthy=False, last_exit=256)], set(), T0) == []
+    assert state["agent_health"]["com.groceryhelper.recipes"] is False
+
+
+def test_agent_failure_banners_once_with_exit_code():
+    state = agents_seeded([A(healthy=True)])
+    events = observe_agents(state, [A(healthy=False, last_exit=256, status="idle")], set(), T1)
+    assert [e["kind"] for e in events] == ["agent_failed"]
+    assert events[0]["severity"] == "bad"
+    assert "exit 256" in events[0]["summary"]
+    assert "agent:com.groceryhelper.recipes" in state["active"]
+    # Stays failed → no re-banner on the next scan.
+    assert observe_agents(state, [A(healthy=False, last_exit=256)], set(), T1) == []
+
+
+def test_expected_stop_does_not_banner_but_still_updates_health():
+    """A dashboard-initiated stop is expected; it must NOT read as a crash — but the
+    health MUST still flip, or the later recovery event never fires."""
+    state = agents_seeded([A(label="com.x", healthy=True)])
+    events = observe_agents(state, [A(label="com.x", healthy=False, last_exit=143)],
+                            {"com.x"}, T1)
+    assert events == []
+    assert state["agent_health"]["com.x"] is False  # sabotage target
+
+
+def test_agent_recovery_is_log_only_and_clears_the_alert():
+    state = agents_seeded([A(healthy=True)])
+    observe_agents(state, [A(healthy=False, last_exit=1)], set(), T1)
+    assert "agent:com.groceryhelper.recipes" in state["active"]
+    events = observe_agents(state, [A(healthy=True, last_exit=0)], set(), T1)
+    assert [e["kind"] for e in events] == ["agent_recovered"]
+    assert events[0]["banner"] is False
+    assert "agent:com.groceryhelper.recipes" not in state["active"]
+
+
+def test_agent_failure_ignores_a_prior_ack():
+    """agent_failed is a TRANSITION, not a first-sighting: an ack resolves one episode,
+    the next failure is a new fact (a permanent per-agent mute would re-hide the recipes
+    job). Contrast a `new_listener` ack, which is 'I know, hush forever'."""
+    assert "agent_failed" in _TRANSITION_KINDS and "now_exposed" in _TRANSITION_KINDS
+    state = agents_seeded([A(healthy=True)])
+    observe_agents(state, [A(healthy=False, last_exit=1)], set(), T1)
+    assert ack(state, "agent:com.groceryhelper.recipes")["ok"] is True
+    observe_agents(state, [A(healthy=True)], set(), T1)          # recover
+    events = observe_agents(state, [A(healthy=False, last_exit=1)], set(), T1)  # fail again
+    assert [e["kind"] for e in events] == ["agent_failed"]
+
+
+def test_removed_agent_is_pruned_and_reseeds():
+    state = agents_seeded([A(label="com.gone", healthy=True)])
+    observe_agents(state, [], set(), T1)                      # agent disappears
+    assert "com.gone" not in state["agent_health"]
+    # Re-adding it seeds silently (no false failure just because it came back).
+    assert observe_agents(state, [A(label="com.gone", healthy=False, last_exit=9)],
+                          set(), T1) == []
+
+
+# --------------------------------------------------------------------------- #
+# Notification history
+# --------------------------------------------------------------------------- #
+def test_record_notification_is_capped_and_newest_first():
+    state = {}
+    for i in range(NOTIFY_RING + 20):
+        record_notification(state, title="t", body=f"b{i}", ok=True, now=T1)
+    assert len(state["notifications"]) == NOTIFY_RING
+    assert state["notifications"][0]["body"] == f"b{NOTIFY_RING + 19}"
+    assert "notify_failures" not in state
+
+
+def test_failed_send_is_recorded_and_counted():
+    state = {}
+    record_notification(state, title="t", body="b", ok=False, now=T1)
+    record_notification(state, title="t", body="b2", ok=False, now=T1)
+    assert state["notify_failures"] == 2
+    assert state["notifications"][0]["ok"] is False
 
 
 # --------------------------------------------------------------------------- #

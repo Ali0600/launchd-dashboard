@@ -140,6 +140,25 @@ def test_watch_allow_app_only_for_listener_alerts():
     assert 'a.key.startsWith("listen:")' in watch
 
 
+def test_history_toggle_fetches_the_sent_log_only_when_on():
+    """The sent-banner log is larger than the live summary, so it's fetched only while
+    the history toggle is on — the 30s poll must stay cheap."""
+    js = script()
+    assert 'id="showHistory"' in PAGE and 'id="notiflist"' in PAGE
+    watch = js.split("async function loadWatch", 1)[1].split("async function loadNotifications", 1)[0]
+    assert 'if ($("showHistory").checked) loadNotifications()' in watch
+    # loadNotifications escapes the sent-banner body/title (still process-named text).
+    notif = js.split("async function loadNotifications", 1)[1]
+    assert "esc(nt.body)" in notif and "esc(nt.title)" in notif
+
+
+def test_watch_renders_detail_and_failed_send_count():
+    js = script()
+    watch = js.split("async function loadWatch", 1)[1].split("async function loadNotifications", 1)[0]
+    assert "esc(a.detail)" in watch and "esc(e.detail)" in watch
+    assert "failed sends" in watch  # notify_failures surfaced in the meta line
+
+
 def test_rows_carry_the_log_key_the_panel_is_placed_by():
     """placeLog() finds its row by data-log-key; both row templates must emit one,
     matching the keys openLogPanel is called with (label / app:<slug>)."""

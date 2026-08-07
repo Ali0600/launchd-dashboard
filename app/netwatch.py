@@ -39,6 +39,7 @@ STATE_PATH = Path(__file__).resolve().parent.parent / "netwatch.json"
 STATE_LOCK = threading.Lock()
 
 EVENT_RING = 200
+NOTIFY_RING = 200
 
 # Kinds that alert (go to `active` + banner); everything else is log-only.
 _ALERT_SEVERITY = {
@@ -47,7 +48,14 @@ _ALERT_SEVERITY = {
     "now_exposed": "bad",
     "lan_connect": "warn",
     "public_connect": "bad",
+    "agent_failed": "bad",
 }
+
+# Kinds that are a state TRANSITION, not a first-sighting. These alert even for a key
+# that was previously acked — an ack resolves the current episode, the next flip is a
+# new fact. (A per-key mute here would have re-hidden the recipes job that died silently
+# for 11 days.) Contrast the "new_*" kinds, where an ack is a permanent "I know, hush".
+_TRANSITION_KINDS = {"now_exposed", "agent_failed"}
 
 
 # --------------------------------------------------------------------------- #
@@ -142,17 +150,17 @@ def conn_key(conn: dict) -> str:
 # Observation (pure; mutates the passed state dict, returns this cycle's events)
 # --------------------------------------------------------------------------- #
 def _emit(state: dict, events: list, *, kind: str, key: str, summary: str,
-          command: str, now: str) -> None:
+          command: str, now: str, detail: str = "") -> None:
     severity = _ALERT_SEVERITY.get(kind, "info")
     banner = kind in _ALERT_SEVERITY
     ev = {"ts": now, "kind": kind, "key": key, "summary": summary,
-          "severity": severity, "banner": banner}
+          "severity": severity, "banner": banner, "detail": detail}
     events.append(ev)
     state["events"] = ([ev] + state.get("events", []))[:EVENT_RING]
     if banner:
         state.setdefault("active", {})[key] = {
             "ts": now, "kind": kind, "summary": summary,
-            "severity": severity, "command": command,
+            "severity": severity, "command": command, "detail": detail,
         }
 
 
@@ -191,7 +199,8 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
             where = f" ({e['project']})" if e.get("project") else ""
             reach = "exposed to the LAN" if exposed else "on loopback"
             _emit(state, events, kind=kind, key=key, command=e["command"], now=now,
-                  summary=f"{e['command']} started listening on :{e['port']} {reach}{where}")
+                  summary=f"{e['command']} started listening on :{e['port']} {reach}{where}",
+                  detail=_listener_detail(e))
         elif exposed and not prev.get("exposed"):
             prev["exposed"] = True
             # A previously ACKED key still alerts here: the ack blessed a loopback
@@ -200,7 +209,8 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
             if seeding or e.get("system") or e["command"] in acked_commands:
                 continue
             _emit(state, events, kind="now_exposed", key=key, command=e["command"], now=now,
-                  summary=f"{e['command']} on :{e['port']} flipped from loopback to LAN-exposed")
+                  summary=f"{e['command']} on :{e['port']} flipped from loopback to LAN-exposed",
+                  detail=_listener_detail(e))
 
     for c in inbound_conns:
         key = conn_key(c)
@@ -212,11 +222,78 @@ def observe(state: dict, listeners: list[dict], inbound_conns: list[dict],
         kind = "lan_connect" if c["remote_class"] == "lan" else "public_connect"
         who = "device" if c["remote_class"] == "lan" else "PUBLIC address"
         _emit(state, events, kind=kind, key=key, command=c["command"], now=now,
-              summary=f"{who} {c['rhost']} connected to :{c['lport']} ({c['command']})")
+              summary=f"{who} {c['rhost']} connected to :{c['lport']} ({c['command']})",
+              detail=f"{c['rhost']}:{c['rport']} → :{c['lport']} · pid {c['pid']}")
 
     if seeding:
         state["seeded_at"] = now
     return events
+
+
+def _listener_detail(e: dict) -> str:
+    bits = [f"pid {e['pid']}", ", ".join(e.get("addresses") or [])]
+    where = e.get("project") or e.get("cwd")
+    if where:
+        bits.append(where)
+    if e.get("agent"):
+        bits.append(e["agent"])
+    return " · ".join(b for b in bits if b)
+
+
+def observe_agents(state: dict, agents: list[dict], expected: "set[str]",
+                   now: str) -> list[dict]:
+    """Diff launchd agent health against the last scan. A user agent going
+    unhealthy (a nonzero last exit with no live pid) banners once — this is the
+    class of failure that hid `com.groceryhelper.recipes` dying for 11 days.
+
+    `expected` names labels the dashboard just stopped/restarted itself, so a
+    deliberate stop doesn't read as a crash. Recovery clears the episode.
+    """
+    events: list[dict] = []
+    health = state.setdefault("agent_health", {})
+    seeding_agents = "agents_seeded_at" not in state
+
+    present = set()
+    for a in agents:
+        label = a["label"]
+        present.add(label)
+        healthy = bool(a.get("healthy"))
+        prev = health.get(label)
+        health[label] = healthy
+        if prev is None or healthy == prev:
+            continue  # first sighting (seed) or no change
+        if not healthy:  # True -> False
+            if seeding_agents or label in expected:
+                continue
+            exit_note = f" (exit {a['last_exit']})" if a.get("last_exit") not in (None,) else ""
+            _emit(state, events, kind="agent_failed", key=f"agent:{label}",
+                  command=label, now=now,
+                  summary=f"agent {label} failed{exit_note}",
+                  detail=f"status {a.get('status', '?')} · {a.get('schedule', '')}".strip(" ·"))
+        else:  # False -> True: recovered — resolve the episode
+            (state.get("active") or {}).pop(f"agent:{label}", None)
+            _emit(state, events, kind="agent_recovered", key=f"agent:{label}",
+                  command=label, now=now, summary=f"agent {label} recovered")
+
+    # Drop labels that no longer exist (removed app / deleted plist) so re-adding re-seeds.
+    for gone in [k for k in health if k not in present]:
+        health.pop(gone)
+        (state.get("active") or {}).pop(f"agent:{gone}", None)
+
+    if seeding_agents:
+        state["agents_seeded_at"] = now
+    return events
+
+
+def record_notification(state: dict, *, title: str, body: str, ok: bool,
+                        now: str) -> None:
+    """Log a banner the watcher tried to post — newest first, capped. A failed send
+    also bumps a persisted counter: a dead notification channel must announce itself,
+    the same way `watch_errors` does for the loop."""
+    entry = {"ts": now, "title": title, "body": body, "ok": ok}
+    state["notifications"] = ([entry] + state.get("notifications", []))[:NOTIFY_RING]
+    if not ok:
+        state["notify_failures"] = state.get("notify_failures", 0) + 1
 
 
 def ack(state: dict, key: str) -> dict:

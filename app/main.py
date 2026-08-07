@@ -8,6 +8,7 @@ jobs, so the dashboard is not meant to be exposed beyond your machine.
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -23,11 +24,30 @@ _discovered: list = []
 WATCH_INTERVAL_S = 30
 _watch_status = {"errors": 0, "last_run": None}
 
+# Labels the dashboard deliberately stopped/restarted, with a short expiry — so the
+# watcher doesn't banner "agent X failed (exit 143)" for an exit the user asked for.
+# In-memory (a restart clears it, which is fine: the watcher re-seeds agent health on
+# boot anyway, so nothing pending reads as a fresh failure).
+_EXPECTED_EXIT_TTL_S = 90
+_expected_exits: dict = {}
 
-def _scan_ports() -> "tuple[list, list]":
+
+def _expect_exit(label: str) -> None:
+    _expected_exits[label] = time.monotonic() + _EXPECTED_EXIT_TTL_S
+
+
+def _expected_now() -> "set[str]":
+    t = time.monotonic()
+    for label in [k for k, deadline in _expected_exits.items() if deadline < t]:
+        _expected_exits.pop(label, None)
+    return set(_expected_exits)
+
+
+def _scan_ports() -> "tuple[list, list, list]":
     """The ONE listener scan + attribution path — used by /api/ports AND the network
     watcher. Two paths answering "who holds this port?" would drift (the moved-project
-    bug all over again), so both go through here."""
+    bug all over again), so both go through here. Returns (port entries, app specs,
+    agent rows) — the agent rows feed both port attribution and the failure watch."""
     # vendor agents included on purpose: a vendor job holding a port is still
     # the answer to "who has :XXXX?"
     agents = launchd.list_agents(include_vendor=True)
@@ -39,27 +59,40 @@ def _scan_ports() -> "tuple[list, list]":
         info = apps.describe(spec)
         if info["pid"]:
             agent_pids[info["pid"]] = spec.label
-    return ports.list_ports(agent_pids), specs
+    return ports.list_ports(agent_pids), specs, agents
 
 
 def _watch_once() -> None:
-    """One network-watch cycle: scan, diff against the known set, banner the news."""
-    scanned, _specs = _scan_ports()
+    """One watch cycle: diff the port scan for network changes AND the agent list for
+    failures, then post (and record) every banner."""
+    scanned, _specs, agents = _scan_ports()
     inb = netwatch.inbound(netwatch.established(), {e["port"] for e in scanned})
+    # Only the user's OWN agents — vendor jobs churn and aren't the user's to fix.
+    own_agents = [a for a in agents if not a.get("vendor")]
+    expected = _expected_now()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with netwatch.STATE_LOCK:
         state = netwatch.load_state()
         events = netwatch.observe(state, scanned, inb, now)
+        events += netwatch.observe_agents(state, own_agents, expected, now)
         netwatch.save_state(state)
     _watch_status["last_run"] = now
+
     banners = [ev for ev in events if ev["banner"]]
+    posted = []
     if len(banners) > 3:  # collapse a storm into one banner; details are in the page
-        netwatch.post_notification(
-            "launchd dashboard", f"{len(banners)} new network events — open the dashboard"
-        )
+        body = f"{len(banners)} new events — open the dashboard"
+        posted.append(("launchd dashboard", body, netwatch.post_notification("launchd dashboard", body)))
     else:
         for ev in banners:
-            netwatch.post_notification("launchd dashboard", ev["summary"])
+            posted.append(("launchd dashboard", ev["summary"],
+                           netwatch.post_notification("launchd dashboard", ev["summary"])))
+    if posted:  # record what we actually tried to send (incl. failed sends)
+        with netwatch.STATE_LOCK:
+            state = netwatch.load_state()
+            for title, body, ok in posted:
+                netwatch.record_notification(state, title=title, body=body, ok=ok, now=now)
+            netwatch.save_state(state)
 
 
 async def _watch_loop() -> None:
@@ -119,12 +152,14 @@ def api_log(label: str, lines: int = 200) -> dict:
 @app.post("/api/agents/{label}/run")
 def api_run(label: str) -> dict:
     _plist_or_404(label)
+    _expect_exit(label)  # kickstart -k kills the running job first — not a crash
     return launchd.run_now(label)
 
 
 @app.post("/api/agents/{label}/stop")
 def api_stop(label: str) -> dict:
     _plist_or_404(label)
+    _expect_exit(label)  # a user-requested stop must not read as a failure
     return launchd.stop(label)
 
 
@@ -137,6 +172,7 @@ def api_enable(label: str) -> dict:
 @app.post("/api/agents/{label}/disable")
 def api_disable(label: str) -> dict:
     _plist_or_404(label)
+    _expect_exit(label)  # disabling can unload a running job — expected, not a crash
     return launchd.set_enabled(label, False)
 
 
@@ -232,7 +268,7 @@ def api_app_log(slug: str, lines: int = 200) -> dict:
 
 @app.get("/api/ports")
 def api_ports(all: bool = False) -> JSONResponse:
-    scanned, specs = _scan_ports()
+    scanned, specs, _agents = _scan_ports()
     # A port held by a hidden *system* listener is still taken, so the claimed set is
     # derived from the whole scan — never from the display-filtered rows.
     live = {e["port"] for e in scanned}
@@ -261,6 +297,23 @@ def api_watch() -> dict:
         "seeded_at": state.get("seeded_at"),
         "errors": _watch_status["errors"],
         "last_run": _watch_status["last_run"],
+        "notify_failures": state.get("notify_failures", 0),
+    }
+
+
+@app.get("/api/watch/history")
+def api_watch_history(events: int = 200, notifications: int = 200) -> dict:
+    """The full record behind the live section — every event the watcher logged and
+    every banner it tried to send (successes AND failures). Fetched on demand (it's
+    larger than the live summary), so the 30s poll stays cheap."""
+    with netwatch.STATE_LOCK:
+        state = netwatch.load_state()
+    return {
+        "events": (state.get("events") or [])[:events],
+        "notifications": (state.get("notifications") or [])[:notifications],
+        "seeded_at": state.get("seeded_at"),
+        "agents_seeded_at": state.get("agents_seeded_at"),
+        "notify_failures": state.get("notify_failures", 0),
     }
 
 
@@ -376,9 +429,17 @@ PAGE = """<!DOCTYPE html>
   <div class="list" id="portlist"><div class="empty">Loading…</div></div>
   <div class="section" style="display:flex;align-items:center;justify-content:space-between">
     <span>Network watch</span>
-    <span class="muted" id="watchmeta" style="text-transform:none;letter-spacing:0"></span>
+    <span style="display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0">
+      <span class="muted" id="watchmeta"></span>
+      <label class="muted" style="display:flex;align-items:center;gap:6px;font-size:12px">
+        <input type="checkbox" id="showHistory"/> history</label>
+    </span>
   </div>
   <div class="list" id="watchlist"><div class="empty">Loading…</div></div>
+  <div id="historywrap" style="display:none">
+    <div class="section" style="font-size:11px">Notifications sent</div>
+    <div class="list" id="notiflist"></div>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -745,24 +806,43 @@ async function loadWatch() {
   document.title = n ? `(${n}!) launchd dashboard` : "launchd dashboard";
   $("watchmeta").textContent =
     (w.errors ? `⚠ ${w.errors} watch errors · ` : "") +
+    (w.notify_failures ? `✗ ${w.notify_failures} failed sends · ` : "") +
     (w.seeded_at ? `watching since ${new Date(w.seeded_at).toLocaleDateString()}` : "first scan pending…");
   const active = w.active.slice().reverse().map(a => `<div class="row">
       <span class="dot ${a.severity === "bad" ? "bad" : "warn"}"></span>
       <div class="meta">
         <div class="lbl">${esc(a.summary)}</div>
-        <div class="sub">${esc(a.kind)} · ${rel(a.ts)}</div>
+        <div class="sub">${esc(a.kind)}${a.detail ? " · " + esc(a.detail) : ""} · ${rel(a.ts)}</div>
       </div>
       <span class="pill ${a.severity === "bad" ? "bad" : "warn"}">${a.severity === "bad" ? "alert" : "notice"}</span>
       <button data-ack="${esc(a.key)}" title="OK — never alert for this again">OK</button>
       ${a.key.startsWith("listen:") ? `<button data-ackcmd="${esc(a.command)}" title="Always allow ${esc(a.command)} on any port">allow app</button>` : ""}
     </div>`);
-  const recent = w.events.slice(0, 10).map(e => `<div class="row" style="opacity:.55">
+  // history toggle: show the whole event ring, else the recent tail.
+  const depth = $("showHistory").checked ? w.events.length : 10;
+  const recent = w.events.slice(0, depth).map(e => `<div class="row" style="opacity:.55">
       <span class="dot ${e.banner ? (e.severity === "bad" ? "bad" : "warn") : "off"}"></span>
-      <div class="meta"><div class="sub">${esc(e.summary)} · ${rel(e.ts)}</div></div>
+      <div class="meta"><div class="sub">${esc(e.summary)}${e.detail ? " · " + esc(e.detail) : ""} · ${rel(e.ts)}</div></div>
     </div>`);
   $("watchlist").innerHTML = active.concat(recent).join("") ||
-    `<div class="empty">Nothing new — fresh listeners, LAN exposure, and inbound connections will show up here.</div>`;
+    `<div class="empty">Nothing new — fresh listeners, LAN exposure, inbound connections, and agent failures will show up here.</div>`;
+  if ($("showHistory").checked) loadNotifications();
 }
+
+// The sent-banner log — larger than the live summary, so fetched only when history is on.
+async function loadNotifications() {
+  const r = await fetch("/api/watch/history?events=0");
+  const h = await r.json();
+  $("notiflist").innerHTML = (h.notifications || []).map(nt => `<div class="row">
+      <span class="pill ${nt.ok ? "ok" : "bad"}">${nt.ok ? "sent" : "failed"}</span>
+      <div class="meta">
+        <div class="sub">${esc(nt.body)}</div>
+        <div class="sub muted">${esc(nt.title)} · ${rel(nt.ts)}</div>
+      </div>
+    </div>`).join("") ||
+    `<div class="empty">No banners sent yet.</div>`;
+}
+$("showHistory").onchange = () => { $("historywrap").style.display = $("showHistory").checked ? "" : "none"; loadWatch(); };
 
 // Delegated: the handler lives on the container, which innerHTML never replaces.
 $("watchlist").onclick = async (ev) => {
